@@ -13,6 +13,7 @@ use crate::gui::theme::Theme;
 use crate::gui::tray::{TrayAction, TrayManager};
 use crate::gui::visualizer_widget::VisualizerWidget;
 use crate::utils::autostart;
+use crate::utils::single_instance::SingleInstanceGuard;
 
 #[derive(PartialEq, Clone, Copy)]
 enum PreferencesTab {
@@ -28,6 +29,7 @@ pub struct PoseaMixerApp {
     selected_output: Arc<RwLock<Option<String>>>,
     reload_requested: Arc<AtomicBool>,
     tray_manager: Option<TrayManager>,
+    single_instance: SingleInstanceGuard,
 
     // UI Durumları
     minimize_to_tray: bool,
@@ -67,8 +69,10 @@ impl PoseaMixerApp {
         selected_output: Arc<RwLock<Option<String>>>,
         reload_requested: Arc<AtomicBool>,
         config: AppConfig,
+        single_instance: SingleInstanceGuard,
     ) -> Self {
         Theme::apply(&_cc.egui_ctx);
+        *single_instance.egui_ctx.write() = Some(_cc.egui_ctx.clone());
 
         let tray_manager = TrayManager::new();
         let autostart_enabled = autostart::is_autostart_enabled();
@@ -82,6 +86,7 @@ impl PoseaMixerApp {
             selected_output,
             reload_requested,
             tray_manager,
+            single_instance,
             minimize_to_tray: config.ui.minimize_to_tray,
             is_window_visible: true,
             autostart_enabled,
@@ -350,6 +355,14 @@ impl eframe::App for PoseaMixerApp {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // 0. İkinci Bir Kopya Başlatıldığında Pencereyi Aç ve Ön Plana Getir (Single Instance Focus)
+        if self.single_instance.show_window_flag.swap(false, Ordering::SeqCst) {
+            self.is_window_visible = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
 
         // 1. Sistem Tepsisi (Tray) Olaylarını Kontrol Et
         if let Some(ref tray) = self.tray_manager {

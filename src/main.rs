@@ -14,6 +14,7 @@ use crate::dsp::{DspSettings, VisualizerData};
 use crate::engine::AudioBridge;
 use crate::gui::app::PoseaMixerApp;
 use crate::utils::config::AppConfig;
+use crate::utils::single_instance::SingleInstance;
 
 fn main() -> eframe::Result<()> {
     std::panic::set_hook(Box::new(|info| {
@@ -21,6 +22,10 @@ fn main() -> eframe::Result<()> {
     }));
 
     let is_minimized = std::env::args().any(|arg| arg == "--minimized");
+
+    // Tek Çalışan Örnek (Single Instance) Koruması:
+    // Zaten bir kopya çalışıyorsa, ona pencereyi açmasını söyler ve bu süreci sonlandırır.
+    let single_instance = SingleInstance::acquire(is_minimized);
 
     // Kayıtlı kullanıcı ayarlarını yükle (AppData/PoseaAudio/config.json)
     let config = AppConfig::load();
@@ -101,6 +106,7 @@ fn main() -> eframe::Result<()> {
                 selected_output,
                 reload_requested,
                 config,
+                single_instance,
             );
             Ok(Box::new(app))
         }),
