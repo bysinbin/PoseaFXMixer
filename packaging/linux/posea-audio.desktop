@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Posea Audio
+Comment=Professional Real-time Sound Enhancer and 31-Band Equalizer
+Exec=posea_fx_mixer
+Icon=posea-audio
+Terminal=false
+Type=Application
+Categories=AudioVideo;Audio;Mixer;
+StartupWMClass=posea_fx_mixer
+Keywords=audio;sound;dsp;equalizer;bass;enhancer;volume;

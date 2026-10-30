@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <Product Id="*"
+             Name="Posea Audio"
+             Language="1033"
+             Version="1.0.0"
+             Manufacturer="Posea Audio Team"
+             UpgradeCode="B9F7423D-8821-4E1B-943C-3B9B97C3A7E2">
+
+        <Package InstallerVersion="300"
+                 Compressed="yes"
+                 InstallScope="perMachine"
+                 Description="Posea Audio Mixer and Sound Enhancer"
+                 Comments="Professional Audio Enhancement Platform" />
+
+        <MajorUpgrade DowngradeErrorMessage="A newer version of Posea Audio is already installed." />
+        <MediaTemplate EmbedCab="yes" />
+
+        <Icon Id="AppIcon" SourceFile="assets\icon.ico" />
+        <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+        <Property Id="ARPHELPLINK" Value="https://github.com/Ulmo/PoseaAudio" />
+
+        <Directory Id="TARGETDIR" Name="SourceDir">
+            <Directory Id="ProgramFiles64Folder">
+                <Directory Id="INSTALLFOLDER" Name="Posea Audio">
+                    <Component Id="MainExecutable" Guid="7C88451B-7492-4933-9F93-87B75A95A110" Win64="yes">
+                        <File Id="PoseaExe"
+                              Source="target\release\posea_fx_mixer.exe"
+                              KeyPath="yes">
+                            <Shortcut Id="DesktopShortcut"
+                                      Directory="DesktopFolder"
+                                      Name="Posea Audio"
+                                      WorkingDirectory="INSTALLFOLDER"
+                                      Icon="AppIcon"
+                                      Advertise="yes" />
+                            <Shortcut Id="StartMenuShortcut"
+                                      Directory="ProgramMenuDir"
+                                      Name="Posea Audio"
+                                      WorkingDirectory="INSTALLFOLDER"
+                                      Icon="AppIcon"
+                                      Advertise="yes" />
+                        </File>
+                    </Component>
+                </Directory>
+            </Directory>
+
+            <Directory Id="ProgramMenuFolder">
+                <Directory Id="ProgramMenuDir" Name="Posea Audio">
+                    <Component Id="ProgramMenuDirComponent" Guid="D2A6836B-914F-4822-83AA-7C693E37839D">
+                        <RemoveFolder Id="ProgramMenuDir" On="uninstall" />
+                        <RegistryValue Root="HKCU" Key="Software\PoseaAudio" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+                    </Component>
+                </Directory>
+            </Directory>
+
+            <Directory Id="DesktopFolder" Name="Desktop" />
+        </Directory>
+
+        <Feature Id="MainApplication" Title="Posea Audio" Level="1">
+            <ComponentRef Id="MainExecutable" />
+            <ComponentRef Id="ProgramMenuDirComponent" />
+        </Feature>
+    </Product>
+</Wix>

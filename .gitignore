@@ -1,0 +1,20 @@
+# Rust
+/target
+**/*.rs.bk
+
+# Build and Distribution Artifacts
+/dist
+/all-dist
+/release_assets
+
+# Temporary and Log Files
+*.log
+err.txt
+out.txt
+panic.txt
+
+# OS / Editor Specific
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

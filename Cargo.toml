@@ -1,0 +1,27 @@
+[package]
+name = "posea_fx_mixer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+biquad = "0.6.0"
+cpal = "0.18.2"
+eframe = { version = "0.37.0", default-features = false, features = ["default", "wgpu"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+parking_lot = "0.13.0"
+realfft = "3.5.1"
+ringbuf = "0.5.3"
+rubato = "5.0.1"
+tray-icon = "0.26.1"
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_UI_Shell_PropertiesSystem"
+] }
+
+[build-dependencies]
+winres = "0.1.12"
