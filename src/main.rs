@@ -13,6 +13,7 @@ use parking_lot::RwLock;
 use crate::dsp::{DspSettings, VisualizerData};
 use crate::engine::AudioBridge;
 use crate::gui::app::PoseaMixerApp;
+use crate::utils::config::AppConfig;
 
 fn main() -> eframe::Result<()> {
     std::panic::set_hook(Box::new(|info| {
@@ -21,10 +22,23 @@ fn main() -> eframe::Result<()> {
 
     let is_minimized = std::env::args().any(|arg| arg == "--minimized");
 
-    let settings = Arc::new(RwLock::new(DspSettings::default()));
+    // Kayıtlı kullanıcı ayarlarını yükle (AppData/PoseaAudio/config.json)
+    let config = AppConfig::load();
+
+    let mut initial_dsp = DspSettings::default();
+    initial_dsp.enabled = config.dsp.enabled;
+    initial_dsp.clarity = config.dsp.clarity;
+    initial_dsp.ambience = config.dsp.ambience;
+    initial_dsp.surround = config.dsp.surround;
+    initial_dsp.dynamic_boost = config.dsp.dynamic_boost;
+    initial_dsp.bass_boost = config.dsp.bass_boost;
+    initial_dsp.master_volume = config.dsp.master_volume;
+    initial_dsp.eq_bands = config.dsp.eq_bands;
+
+    let settings = Arc::new(RwLock::new(initial_dsp));
     let visualizer = VisualizerData::new();
     let selected_input = Arc::new(RwLock::new(None));
-    let selected_output = Arc::new(RwLock::new(None));
+    let selected_output = Arc::new(RwLock::new(config.ui.selected_output.clone()));
     let reload_requested = Arc::new(AtomicBool::new(false));
 
     // Ses köprüsünü (Audio Bridge) bağımsız yüksek öncelikli iş parçacığında başlat
@@ -86,6 +100,7 @@ fn main() -> eframe::Result<()> {
                 selected_input,
                 selected_output,
                 reload_requested,
+                config,
             );
             Ok(Box::new(app))
         }),

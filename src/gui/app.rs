@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use crate::utils::config::{AppConfig, DspConfig, UiConfig};
 use cpal::traits::{DeviceTrait, HostTrait};
 use eframe::egui::{self, Color32, CornerRadius, CursorIcon, Margin, Pos2, Rect, ResizeDirection, RichText, Sense, Stroke, Vec2};
 use parking_lot::RwLock;
@@ -50,6 +51,11 @@ pub struct PoseaMixerApp {
     // Pencere Boyutlandırma & Kilitli EQ Durumları
     is_resizing_window: bool,
     active_eq_band: Option<usize>,
+
+    // Ayarları Kaydetme Takibi
+    last_saved_version: u64,
+    last_save_time: Instant,
+    ui_dirty: bool,
 }
 
 impl PoseaMixerApp {
@@ -60,12 +66,14 @@ impl PoseaMixerApp {
         selected_input: Arc<RwLock<Option<String>>>,
         selected_output: Arc<RwLock<Option<String>>>,
         reload_requested: Arc<AtomicBool>,
+        config: AppConfig,
     ) -> Self {
         Theme::apply(&_cc.egui_ctx);
 
         let tray_manager = TrayManager::new();
         let autostart_enabled = autostart::is_autostart_enabled();
         let cached_devices = Self::scan_devices();
+        let last_saved_version = settings.read().version;
 
         Self {
             settings,
@@ -74,22 +82,66 @@ impl PoseaMixerApp {
             selected_output,
             reload_requested,
             tray_manager,
-            minimize_to_tray: true,
+            minimize_to_tray: config.ui.minimize_to_tray,
             is_window_visible: true,
             autostart_enabled,
             show_preferences_modal: false,
             pref_active_tab: PreferencesTab::Audio,
-            selected_preset_name: "Music".to_string(),
+            selected_preset_name: config.ui.selected_preset_name,
             cached_devices,
             preset_dropdown_open: false,
             device_dropdown_open: false,
-            master_volume_db: 0.0,
-            normalization_db: 0.0,
-            filter_q: 1.0,
-            balance: 0.0,
+            master_volume_db: config.ui.master_volume_db,
+            normalization_db: config.ui.normalization_db,
+            filter_q: config.ui.filter_q,
+            balance: config.ui.balance,
             is_resizing_window: false,
             active_eq_band: None,
+            last_saved_version,
+            last_save_time: Instant::now(),
+            ui_dirty: false,
         }
+    }
+
+    /// Kullanıcı ayarlarını diske (%APPDATA%/PoseaAudio/config.json) kaydeder
+    pub fn save_to_disk(&mut self) {
+        let (dsp_cfg, cur_ver) = {
+            let s = self.settings.read();
+            (
+                DspConfig {
+                    enabled: s.enabled,
+                    clarity: s.clarity,
+                    ambience: s.ambience,
+                    surround: s.surround,
+                    dynamic_boost: s.dynamic_boost,
+                    bass_boost: s.bass_boost,
+                    master_volume: s.master_volume,
+                    eq_bands: s.eq_bands,
+                },
+                s.version,
+            )
+        };
+
+        let ui_cfg = UiConfig {
+            selected_preset_name: self.selected_preset_name.clone(),
+            selected_output: self.selected_output.read().clone(),
+            minimize_to_tray: self.minimize_to_tray,
+            autostart_enabled: self.autostart_enabled,
+            master_volume_db: self.master_volume_db,
+            normalization_db: self.normalization_db,
+            filter_q: self.filter_q,
+            balance: self.balance,
+        };
+
+        let cfg = AppConfig {
+            dsp: dsp_cfg,
+            ui: ui_cfg,
+        };
+
+        cfg.save();
+        self.last_saved_version = cur_ver;
+        self.last_save_time = Instant::now();
+        self.ui_dirty = false;
     }
 
     fn scan_devices() -> Vec<String> {
@@ -316,6 +368,7 @@ impl eframe::App for PoseaMixerApp {
                     s.version += 1;
                 }
                 TrayAction::Quit => {
+                    self.save_to_disk();
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     std::process::exit(0);
                 }
@@ -331,6 +384,7 @@ impl eframe::App for PoseaMixerApp {
 
         // 2. Pencere Kapatma (X Butonu) Yakalama
         if ctx.input(|i| i.viewport().close_requested()) {
+            self.save_to_disk();
             if self.minimize_to_tray {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.is_window_visible = false;
@@ -412,6 +466,7 @@ impl eframe::App for PoseaMixerApp {
                 }
                 tb_painter.text(close_rect.center(), egui::Align2::CENTER_CENTER, "✕", egui::FontId::proportional(12.0), Color32::WHITE);
                 if close_resp.clicked() {
+                    self.save_to_disk();
                     if self.minimize_to_tray {
                         self.is_window_visible = false;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
@@ -696,6 +751,7 @@ impl eframe::App for PoseaMixerApp {
                                         if item_resp.clicked() {
                                             self.selected_preset_name = name.to_string();
                                             self.preset_dropdown_open = false;
+                                            self.ui_dirty = true;
                                             let mut s = self.settings.write();
                                             match key {
                                                 "general" => s.preset_general(),
@@ -768,6 +824,7 @@ impl eframe::App for PoseaMixerApp {
                                             *self.selected_output.write() = Some(dev.clone());
                                             self.device_dropdown_open = false;
                                             self.reload_requested.store(true, Ordering::SeqCst);
+                                            self.ui_dirty = true;
                                         }
                                     }
                                 });
@@ -856,6 +913,7 @@ impl eframe::App for PoseaMixerApp {
                                                         if ui.selectable_label(cur_out == *d, d).clicked() {
                                                             *self.selected_output.write() = Some(d.clone());
                                                             self.reload_requested.store(true, Ordering::SeqCst);
+                                                            self.ui_dirty = true;
                                                         }
                                                     }
                                                 });
@@ -880,19 +938,26 @@ impl eframe::App for PoseaMixerApp {
                                     if Self::render_pref_slider(ui, "Ana ses seviyesi:", &mut self.master_volume_db, -12.0, 12.0, &vol_str) {
                                         s.master_volume = 10.0_f32.powf(self.master_volume_db / 20.0);
                                         s.version += 1;
+                                        self.ui_dirty = true;
                                     }
 
                                     // 4. Normalizasyon Slider
                                     let norm_str = format!("{:.0} dB", self.normalization_db);
-                                    Self::render_pref_slider(ui, "Normalizasyon:", &mut self.normalization_db, 0.0, 12.0, &norm_str);
+                                    if Self::render_pref_slider(ui, "Normalizasyon:", &mut self.normalization_db, 0.0, 12.0, &norm_str) {
+                                        self.ui_dirty = true;
+                                    }
 
                                     // 5. Filtre Q Slider
                                     let q_str = format!("{:.1}x", self.filter_q);
-                                    Self::render_pref_slider(ui, "Filtre Q:", &mut self.filter_q, 0.5, 3.0, &q_str);
+                                    if Self::render_pref_slider(ui, "Filtre Q:", &mut self.filter_q, 0.5, 3.0, &q_str) {
+                                        self.ui_dirty = true;
+                                    }
 
                                     // 6. Denge (Sol - Sağ) Slider
                                     let bal_str = format!("{:.0} dB", self.balance * 6.0);
-                                    Self::render_pref_slider(ui, "Denge:", &mut self.balance, -1.0, 1.0, &bal_str);
+                                    if Self::render_pref_slider(ui, "Denge:", &mut self.balance, -1.0, 1.0, &bal_str) {
+                                        self.ui_dirty = true;
+                                    }
 
                                     // Denge Altı Sol/Sağ Etiketleri
                                     let (sub_rect, _) = ui.allocate_exact_size(Vec2::new(390.0, 12.0), Sense::hover());
@@ -911,6 +976,7 @@ impl eframe::App for PoseaMixerApp {
                                         self.balance = 0.0;
                                         s.master_volume = 1.0;
                                         s.version += 1;
+                                        self.ui_dirty = true;
                                     }
 
                                     ui.add_space(4.0);
@@ -918,6 +984,7 @@ impl eframe::App for PoseaMixerApp {
                                     if ui.add_sized([390.0, 32.0], egui::Button::new(RichText::new("Ön Ayarları fabrika ayarlara sıfırlayın").size(13.0).color(Color32::WHITE)).fill(Color32::from_rgb(120, 32, 46))).clicked() {
                                         s.preset_default();
                                         self.selected_preset_name = "Default (Flat)".to_string();
+                                        self.ui_dirty = true;
                                     }
                                 }
                                 PreferencesTab::General => {
@@ -926,11 +993,14 @@ impl eframe::App for PoseaMixerApp {
 
                                     if ui.checkbox(&mut self.autostart_enabled, "Windows açılışında otomatik başlat").changed() {
                                         let _ = autostart::set_autostart(self.autostart_enabled);
+                                        self.ui_dirty = true;
                                     }
 
                                     ui.add_space(8.0);
 
-                                    ui.checkbox(&mut self.minimize_to_tray, "Pencere kapatıldığında sistem tepsisine küçült");
+                                    if ui.checkbox(&mut self.minimize_to_tray, "Pencere kapatıldığında sistem tepsisine küçült").changed() {
+                                        self.ui_dirty = true;
+                                    }
 
                                     ui.add_space(16.0);
 
@@ -952,6 +1022,16 @@ impl eframe::App for PoseaMixerApp {
                         });
                     });
                 });
+        }
+
+        // --- 8. OTOMATİK AYAR KAYDETME (DEBOUNCED PERSISTENCE) ---
+        let cur_ver = self.settings.read().version;
+        let pointer_down = ctx.input(|i| i.pointer.primary_down());
+
+        if cur_ver != self.last_saved_version || self.ui_dirty {
+            if !pointer_down || self.last_save_time.elapsed() >= Duration::from_millis(400) {
+                self.save_to_disk();
+            }
         }
     }
 }
