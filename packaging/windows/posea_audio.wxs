@@ -18,7 +18,7 @@
 
         <Icon Id="AppIcon" SourceFile="assets\icon.ico" />
         <Property Id="ARPPRODUCTICON" Value="AppIcon" />
-        <Property Id="ARPHELPLINK" Value="https://github.com/Ulmo/PoseaAudio" />
+        <Property Id="ARPHELPLINK" Value="https://github.com/bysinbin/PoseaFXMixer" />
 
         <Directory Id="TARGETDIR" Name="SourceDir">
             <Directory Id="ProgramFiles64Folder">

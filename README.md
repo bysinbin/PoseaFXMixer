@@ -38,7 +38,7 @@
 
 ## 🚀 Downloads & Installation
 
-Pre-built binaries and installers are published under [GitHub Releases](https://github.com/Ulmo/PoseaAudio/releases).
+Pre-built binaries and installers are published under [GitHub Releases](https://github.com/bysinbin/PoseaFXMixer/releases).
 
 ### 🪟 Windows
 - **Installer (.msi)**: Download `PoseaAudio-vX.X.X-Windows-x64.msi` and run the setup wizard.
@@ -74,8 +74,8 @@ Pre-built binaries and installers are published under [GitHub Releases](https://
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/Ulmo/PoseaAudio.git
-cd PoseaAudio
+git clone https://github.com/bysinbin/PoseaFXMixer.git
+cd PoseaFXMixer
 
 # 2. Generate icons (PNG, ICO, ICNS, SVG)
 python scripts/generate_icons.py
