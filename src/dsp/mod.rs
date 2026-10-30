@@ -13,7 +13,7 @@ pub struct DspSettings {
     pub enabled: bool,
     pub version: u64, // Ayarlar değiştikçe artan sayaç
 
-    // FxSound 5 Ana Geliştirme Kaydırıcısı (0 - 10)
+    // Posea 5 Ana Geliştirme Kaydırıcısı (0 - 10)
     pub clarity: f32,         // Netlik (0..10)
     pub ambience: f32,        // Ortam (0..10)
     pub surround: f32,        // Çevresel Ses (0..10)
@@ -77,7 +77,7 @@ impl DspSettings {
     }
 
     pub fn preset_voice(&mut self) {
-        // Birebir FxSound Voice Preset Akustik Eğrisi
+        // Optimize Edilmiş Voice Preset Akustik Eğrisi
         self.clarity = 6.0;
         self.ambience = 0.0;
         self.surround = 0.0;

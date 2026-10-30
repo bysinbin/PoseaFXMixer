@@ -12,7 +12,7 @@ impl VisualizerWidget {
 
         let painter = ui.painter_at(rect);
 
-        // FxSound tarzı koyu ve zarif zemin kartı
+        // Koyu ve zarif zemin kartı
         painter.rect_filled(rect, 8.0, Theme::BG_CARD);
         painter.rect_stroke(rect, 8.0, Stroke::new(1.0, Color32::from_rgb(32, 34, 44)), egui::StrokeKind::Inside);
 
@@ -47,7 +47,7 @@ impl VisualizerWidget {
 
                 painter.rect_filled(bar_rect, 2.0, color);
             } else {
-                // Sessiz dinlenme noktası (FxSound tarzı)
+                // Sessiz dinlenme noktası
                 let dot_center = Pos2::new(x + (bar_width * 0.5), center_y);
                 painter.circle_filled(dot_center, 1.2, Color32::from_rgb(42, 45, 58));
             }

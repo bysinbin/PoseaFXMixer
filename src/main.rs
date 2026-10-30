@@ -56,13 +56,13 @@ fn main() -> eframe::Result<()> {
         Err(_) => None,
     };
 
-    // FxSound Birebir Eşleşmesi İçin Çerçevesiz (Frameless) ve Şeffaf Köşeli Pencere
+    // Çerçevesiz (Frameless) ve Şeffaf Köşeli Modern Pencere
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Posea Audio")
         .with_decorations(false)         // Standart Windows başlık çubuğunu kaldırır
         .with_transparent(true)           // Yuvarlatılmış zarif köşeler için şeffaflık
         .with_resizable(true)             // Boyutlandırılabilir pencere
-        .with_inner_size([960.0, 540.0])  // FxSound geniş format oranı
+        .with_inner_size([960.0, 540.0])  // 16:9 geniş format oranı
         .with_min_inner_size([880.0, 480.0])
         .with_visible(!is_minimized);
 

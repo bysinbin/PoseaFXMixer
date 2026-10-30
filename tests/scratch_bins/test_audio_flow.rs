@@ -39,8 +39,8 @@ fn main() -> anyhow::Result<()> {
     // Giriş (Sanal Aygıt / Sonic Studio)
     let capture_device = devices.iter().find(|d| {
         let name = d.description().map(|desc| desc.name().to_string()).unwrap_or_default();
-        name.contains("Sonic Studio") || name.contains("Virtual") || name.contains("FxSound")
-    }).expect("Sanal giriş aygıtı (Sonic Studio/FxSound) bulunamadı!").clone();
+        name.contains("Sonic Studio") || name.contains("Virtual")
+    }).expect("Sanal giriş aygıtı (Sonic Studio/Posea Audio) bulunamadı!").clone();
 
     let out_name = output_device.description()?.name().to_string();
     let cap_name = capture_device.description()?.name().to_string();

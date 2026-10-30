@@ -4,7 +4,7 @@ use crate::gui::theme::Theme;
 
 pub struct EqWidget;
 
-// 31-Bant Standart ISO Frekans Etiketleri (FxSound Birebir Eşleşmesi)
+// 31-Bant Standart ISO Frekans Etiketleri
 const FREQ_VALUES: [&str; NUM_EQ_BANDS] = [
     "20", "25", "32", "40", "50", "63", "80", "100", "125", "160",
     "200", "250", "315", "400", "500", "630", "800", "1.0", "1.2", "1.6",
@@ -31,7 +31,7 @@ impl EqWidget {
 
         let painter = ui.painter_at(rect);
 
-        // FxSound tarzı koyu ve zarif zemin kartı
+        // Koyu ve zarif zemin kartı
         painter.rect_filled(rect, 8.0, Theme::BG_CARD);
         painter.rect_stroke(rect, 8.0, Stroke::new(1.0, Color32::from_rgb(32, 34, 44)), egui::StrokeKind::Inside);
 
@@ -126,7 +126,7 @@ impl EqWidget {
             }
         }
 
-        // 4. Eğrinin altındaki yumuşak kırmızı gradyan dolgu (FxSound Estetiği)
+        // 4. Eğrinin altındaki yumuşak kırmızı gradyan dolgu
         if !curve_points.is_empty() {
             let mut fill_mesh = egui::Mesh::default();
             let fill_color = Color32::from_rgba_unmultiplied(255, 42, 85, 26);

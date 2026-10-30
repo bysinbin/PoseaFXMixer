@@ -3,7 +3,7 @@ use eframe::egui::{self, Color32, CornerRadius, Margin, Stroke, Visuals};
 pub struct Theme;
 
 impl Theme {
-    // FxSound Estetiği Renk Paleti (Obsidian & Coral Crimson)
+    // Posea Audio Renk Paleti (Obsidian & Coral Crimson)
     pub const BG_DARK: Color32 = Color32::from_rgb(17, 18, 22);       // #111216
     pub const BG_CARD: Color32 = Color32::from_rgb(23, 24, 30);       // #17181E
     pub const BG_CARD_HOVER: Color32 = Color32::from_rgb(30, 32, 40); // #1E2028
@@ -30,7 +30,7 @@ impl Theme {
         visuals.faint_bg_color = Self::BG_CARD;
         visuals.extreme_bg_color = Self::BG_INPUT;
 
-        // FxSound tarzı Trailing Fill (Kızak arkası crimson dolgu)
+        // Trailing Fill (Kızak arkası crimson dolgu)
         visuals.slider_trailing_fill = true;
         visuals.selection.bg_fill = Self::ACCENT_RED;
         visuals.selection.stroke = Stroke::new(1.0, Color32::WHITE);
@@ -68,7 +68,7 @@ impl Theme {
         ctx.style_mut_of(egui::Theme::Dark, |style| {
             style.spacing.item_spacing = egui::vec2(8.0, 8.0);
             style.spacing.button_padding = egui::vec2(12.0, 6.0);
-            style.spacing.slider_rail_height = 5.0; // Zarif ve ince FxSound kızağı
+            style.spacing.slider_rail_height = 5.0; // Zarif ve ince kızak tasarımı
             style.spacing.slider_width = 160.0;
         });
     }

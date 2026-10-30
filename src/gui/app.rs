@@ -108,7 +108,7 @@ impl PoseaMixerApp {
         names
     }
 
-    /// FxSound İkonik Kızak Çizici (Halka Düğme, Kırmızı İlerleme Hattı ve Çakışmayan Sağ Değer)
+    /// Özel İkonik Kızak Çizici (Halka Düğme, Kırmızı İlerleme Hattı ve Çakışmayan Sağ Değer)
     fn render_fx_slider(ui: &mut egui::Ui, label: &str, val: &mut f32, ignore_input: bool) -> bool {
         let mut changed = false;
         let slider_w = ui.available_width().max(180.0);
@@ -178,7 +178,7 @@ impl PoseaMixerApp {
         changed
     }
 
-    /// Tercihler Modalı İçin Özel Yatay Satır Kaydırıcısı (FxSound media_1793383686130_286d1f53.png Birebir)
+    /// Tercihler Modalı İçin Özel Yatay Satır Kaydırıcısı
     fn render_pref_slider(ui: &mut egui::Ui, label: &str, val: &mut f32, min: f32, max: f32, display_val: &str) -> bool {
         let mut changed = false;
         let (rect, response) = ui.allocate_exact_size(Vec2::new(390.0, 26.0), Sense::click_and_drag());
@@ -775,7 +775,7 @@ impl eframe::App for PoseaMixerApp {
                 }
             });
 
-        // --- 7. TERCİHLER MODAL DİYALOĞU (FxSound media_1793383686130_286d1f53.png Birebir Tasarımı) ---
+        // --- 7. TERCİHLER MODAL DİYALOĞU ---
         if self.show_preferences_modal {
             egui::Window::new("preferences_modal")
                 .title_bar(false)
@@ -833,7 +833,7 @@ impl eframe::App for PoseaMixerApp {
                         ui.separator();
                         ui.add_space(8.0);
 
-                        // Sağ İçerik Alanı (FxSound Birebir Satır Satır Düzen)
+                        // Sağ İçerik Alanı (Satır Satır Düzen)
                         ui.allocate_ui_with_layout(Vec2::new(395.0, 340.0), egui::Layout::top_down(egui::Align::LEFT), |ui| {
                             ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
 
@@ -894,7 +894,7 @@ impl eframe::App for PoseaMixerApp {
                                     let bal_str = format!("{:.0} dB", self.balance * 6.0);
                                     Self::render_pref_slider(ui, "Denge:", &mut self.balance, -1.0, 1.0, &bal_str);
 
-                                    // Denge Altı Sol/Sağ Etiketleri (FxSound media_1793383686130_286d1f53.png Birebir)
+                                    // Denge Altı Sol/Sağ Etiketleri
                                     let (sub_rect, _) = ui.allocate_exact_size(Vec2::new(390.0, 12.0), Sense::hover());
                                     let track_x1 = sub_rect.min.x + 130.0;
                                     let track_x2 = sub_rect.max.x - 48.0;

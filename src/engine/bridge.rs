@@ -294,7 +294,7 @@ impl AudioBridge {
                 if !name.contains("Posea") 
                     && !name.contains("Virtual") 
                     && !name.contains("Sonic Studio") 
-                    && !name.contains("FxSound") 
+                    && !name.to_lowercase().contains("virtual") 
                     && !name.contains("Digital Output") 
                 {
                     if name.contains("LG") || name.contains("AMD") || name.contains("Realtek") || name.contains("Hoparlör") {

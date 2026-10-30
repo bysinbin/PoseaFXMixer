@@ -11,7 +11,7 @@ impl DriverManager {
                 || name.contains("Virtual") 
                 || name.contains("Cable") 
                 || name.contains("Sonic Studio") 
-                || name.contains("FxSound") 
+                
                 || name.contains("Steam Streaming")
         })
     }
