@@ -31,6 +31,7 @@ impl AudioEngine {
 
     /// RDP ve dinamik aygıt değişikliklerine karşı dayanıklı ana çalışma döngüsü
     pub fn run_resilient_loop(&self) {
+        #[cfg(windows)]
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(
                 None,

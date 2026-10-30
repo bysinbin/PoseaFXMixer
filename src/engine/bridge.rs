@@ -44,6 +44,7 @@ impl AudioBridge {
     }
 
     pub fn run(&self) {
+        #[cfg(windows)]
         unsafe {
             let _ = windows::Win32::System::Com::CoInitializeEx(
                 None,

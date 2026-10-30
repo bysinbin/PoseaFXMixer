@@ -36,13 +36,30 @@ Compress-Archive -Path "$portableFolder\*" -DestinationPath $zipPath -Force
 Write-Host "    Portable ZIP created: $zipPath" -ForegroundColor Green
 
 Write-Host ">>> [3/3] Checking WiX Toolset for MSI Installer..." -ForegroundColor Cyan
+
+$wixCandidates = @(
+    "C:\Program Files (x86)\WiX Toolset v3.11\bin",
+    "C:\Program Files (x86)\WiX Toolset v3.14\bin",
+    "C:\Program Files\WiX Toolset v3.11\bin"
+)
+foreach ($dir in $wixCandidates) {
+    if (Test-Path "$dir\candle.exe") {
+        $env:PATH = "$dir;$env:PATH"
+        break
+    }
+}
+
 if ((Get-Command "candle.exe" -ErrorAction SilentlyContinue) -and (Get-Command "light.exe" -ErrorAction SilentlyContinue)) {
-    Write-Host "    Compiling WiX MSI installer..." -ForegroundColor Yellow
-    candle.exe -nologo -out "$distDir\windows\posea.wixobj" "packaging\windows\posea_audio.wxs"
-    light.exe -nologo -ext WixUIExtension -out "$distDir\PoseaAudio-v$Version-Windows-x64.msi" "$distDir\windows\posea.wixobj"
-    Write-Host "    MSI Installer created: $distDir\PoseaAudio-v$Version-Windows-x64.msi" -ForegroundColor Green
+    try {
+        Write-Host "    Compiling WiX MSI installer (x64)..." -ForegroundColor Yellow
+        candle.exe -nologo -arch x64 -out "$distDir\windows\posea.wixobj" "packaging\windows\posea_audio.wxs"
+        light.exe -nologo -ext WixUIExtension -out "$distDir\PoseaAudio-v$Version-Windows-x64.msi" "$distDir\windows\posea.wixobj"
+        Write-Host "    MSI Installer created: $distDir\PoseaAudio-v$Version-Windows-x64.msi" -ForegroundColor Green
+    } catch {
+        Write-Warning "Failed to compile MSI installer: $_"
+    }
 } else {
-    Write-Host "    WiX Toolset (candle/light) not found on local PATH. MSI compilation will be executed automatically on GitHub Actions CI." -ForegroundColor Yellow
+    Write-Host "    WiX Toolset (candle/light) not found on PATH. Only portable ZIP generated." -ForegroundColor Yellow
 }
 
 Write-Host ">>> Windows packaging completed successfully!" -ForegroundColor Green

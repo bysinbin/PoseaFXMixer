@@ -26,11 +26,18 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Generate Icon Assets
+      - name: Setup WiX Toolset
         shell: pwsh
         run: |
-          pip install Pillow
-          python scripts/generate_icons.py
+          $wixDefault = "C:\Program Files (x86)\WiX Toolset v3.11\bin"
+          if (Test-Path "$wixDefault\candle.exe") {
+            echo "$wixDefault" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          } else {
+            choco install wixtoolset -y --no-progress
+            if (Test-Path $wixDefault) {
+              echo "$wixDefault" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            }
+          }
 
       - name: Package Windows (.exe, .zip, .msi)
         shell: pwsh
@@ -45,6 +52,7 @@ jobs:
           path: |
             dist/*.zip
             dist/*.msi
+          if-no-files-found: warn
 
   # ==========================================
   # MACOS BUILD (.app, .dmg)
@@ -62,11 +70,6 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Generate Icon Assets
-        run: |
-          python3 -m pip install Pillow
-          python3 scripts/generate_icons.py
-
       - name: Package macOS (.dmg)
         run: |
           TAG=${GITHUB_REF_NAME#v}
@@ -79,6 +82,7 @@ jobs:
         with:
           name: macos-release
           path: dist/*.dmg
+          if-no-files-found: warn
 
   # ==========================================
   # LINUX BUILD (.deb, .tar.gz)
@@ -93,18 +97,13 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libudev-dev libgtk-3-dev libx11-dev
+          sudo apt-get install -y libasound2-dev libudev-dev libgtk-3-dev libayatana-appindicator3-dev libx11-dev pkg-config
 
       - name: Setup Rust Toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
-
-      - name: Generate Icon Assets
-        run: |
-          python3 -m pip install Pillow
-          python3 scripts/generate_icons.py
 
       - name: Package Linux (.deb, .tar.gz)
         run: |
@@ -120,6 +119,7 @@ jobs:
           path: |
             dist/*.deb
             dist/*.tar.gz
+          if-no-files-found: warn
 
   # ==========================================
   # PUBLISH GITHUB RELEASE
@@ -145,7 +145,7 @@ jobs:
 
       - name: Create Official GitHub Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         with:
           files: release_assets/*
           generate_release_notes: true
