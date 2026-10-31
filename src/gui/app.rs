@@ -1,23 +1,30 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use crate::utils::config::{AppConfig, DspConfig, UiConfig};
+
 use cpal::traits::{DeviceTrait, HostTrait};
 use eframe::egui::{self, Color32, CornerRadius, CursorIcon, Margin, Pos2, Rect, ResizeDirection, RichText, Sense, Stroke, Vec2};
 use parking_lot::RwLock;
 
-use crate::dsp::visualizer_data::VisualizerData;
+use crate::dsp::autoeq::AutoEqDatabase;
+use crate::dsp::visualizer_data::{VisualizerData, NUM_SPECTRUM_BARS};
 use crate::dsp::DspSettings;
+use crate::engine::session_mixer::{self, AppAudioSession};
 use crate::gui::eq_widget::EqWidget;
 use crate::gui::theme::Theme;
 use crate::gui::tray::{TrayAction, TrayManager};
 use crate::gui::visualizer_widget::VisualizerWidget;
 use crate::utils::autostart;
+use crate::utils::config::{AppConfig, CustomPreset, DspConfig, UiConfig};
+use crate::utils::hotkeys::{HotkeyAction, HotkeyManager};
 use crate::utils::single_instance::SingleInstanceGuard;
 
 #[derive(PartialEq, Clone, Copy)]
 enum PreferencesTab {
     Audio,
+    Apps,
+    Presets,
+    Hotkeys,
     General,
     Help,
 }
@@ -30,6 +37,7 @@ pub struct PoseaMixerApp {
     reload_requested: Arc<AtomicBool>,
     tray_manager: Option<TrayManager>,
     single_instance: SingleInstanceGuard,
+    hotkey_manager: HotkeyManager,
 
     // UI Durumları
     minimize_to_tray: bool,
@@ -39,6 +47,7 @@ pub struct PoseaMixerApp {
     pref_active_tab: PreferencesTab,
     selected_preset_name: String,
     cached_devices: Vec<String>,
+    is_mini_mode: bool,
 
     // Özel Açılır Menü (Custom Dropdown) Durumları
     preset_dropdown_open: bool,
@@ -49,6 +58,13 @@ pub struct PoseaMixerApp {
     normalization_db: f32, // 0 .. 12 dB
     filter_q: f32,         // 0.5 .. 3.0x
     balance: f32,          // -1.0 .. +1.0
+
+    // Uygulama Karıştırıcısı & Özel Ön Ayarlar
+    cached_app_sessions: Vec<AppAudioSession>,
+    last_session_scan: Instant,
+    custom_presets: Vec<CustomPreset>,
+    new_preset_name_input: String,
+    preset_status_msg: Option<(String, Instant)>,
 
     // Pencere Boyutlandırma & Kilitli EQ Durumları
     is_resizing_window: bool,
@@ -70,6 +86,7 @@ impl PoseaMixerApp {
         reload_requested: Arc<AtomicBool>,
         config: AppConfig,
         single_instance: SingleInstanceGuard,
+        hotkey_manager: HotkeyManager,
     ) -> Self {
         Theme::apply(&_cc.egui_ctx);
         *single_instance.egui_ctx.write() = Some(_cc.egui_ctx.clone());
@@ -87,6 +104,7 @@ impl PoseaMixerApp {
             reload_requested,
             tray_manager,
             single_instance,
+            hotkey_manager,
             minimize_to_tray: config.ui.minimize_to_tray,
             is_window_visible: true,
             autostart_enabled,
@@ -94,12 +112,18 @@ impl PoseaMixerApp {
             pref_active_tab: PreferencesTab::Audio,
             selected_preset_name: config.ui.selected_preset_name,
             cached_devices,
+            is_mini_mode: config.ui.is_mini_mode,
             preset_dropdown_open: false,
             device_dropdown_open: false,
             master_volume_db: config.ui.master_volume_db,
             normalization_db: config.ui.normalization_db,
             filter_q: config.ui.filter_q,
             balance: config.ui.balance,
+            cached_app_sessions: Vec::new(),
+            last_session_scan: Instant::now() - Duration::from_secs(10),
+            custom_presets: config.ui.custom_presets,
+            new_preset_name_input: String::new(),
+            preset_status_msg: None,
             is_resizing_window: false,
             active_eq_band: None,
             last_saved_version,
@@ -136,6 +160,8 @@ impl PoseaMixerApp {
             normalization_db: self.normalization_db,
             filter_q: self.filter_q,
             balance: self.balance,
+            is_mini_mode: self.is_mini_mode,
+            custom_presets: self.custom_presets.clone(),
         };
 
         let cfg = AppConfig {
@@ -165,6 +191,42 @@ impl PoseaMixerApp {
         names
     }
 
+    /// Ön Ayarı Uygula (Standart, Özel veya AutoEQ)
+    fn apply_preset_by_name(&mut self, name: &str) {
+        self.selected_preset_name = name.to_string();
+        self.ui_dirty = true;
+        let mut s = self.settings.write();
+
+        match name {
+            "General" => s.preset_general(),
+            "Movies" => s.preset_movies(),
+            "Voice" => s.preset_voice(),
+            "Music" => s.preset_music(),
+            "Gaming" => s.preset_gaming(),
+            "Volume Boost" => s.preset_volume_boost(),
+            "Bass Boost" => s.preset_bass_boost(),
+            "Streaming Video" => s.preset_streaming(),
+            "Default (Flat)" => s.preset_default(),
+            _ => {
+                // Özel ön ayarları kontrol et
+                if let Some(cp) = self.custom_presets.iter().find(|p| p.name == name) {
+                    s.clarity = cp.clarity;
+                    s.ambience = cp.ambience;
+                    s.surround = cp.surround;
+                    s.dynamic_boost = cp.dynamic_boost;
+                    s.bass_boost = cp.bass_boost;
+                    s.eq_bands = cp.eq_bands;
+                    s.version += 1;
+                } else if let Some(stripped) = name.strip_prefix("AutoEQ: ") {
+                    // AutoEQ profillerini kontrol et
+                    if let Some(p) = AutoEqDatabase::get_profiles().iter().find(|p| p.model == stripped) {
+                        s.apply_autoeq_profile(p);
+                    }
+                }
+            }
+        }
+    }
+
     /// Özel İkonik Kızak Çizici (Halka Düğme, Kırmızı İlerleme Hattı ve Çakışmayan Sağ Değer)
     fn render_fx_slider(ui: &mut egui::Ui, label: &str, val: &mut f32, ignore_input: bool) -> bool {
         let mut changed = false;
@@ -183,11 +245,10 @@ impl PoseaMixerApp {
         );
 
         let track_start_x = rect.min.x;
-        let track_end_x = rect.max.x - 38.0; // 38px net boşluk (değer asla başparmak ile çakışmaz)
+        let track_end_x = rect.max.x - 38.0;
         let track_w = (track_end_x - track_start_x).max(10.0);
         let track_y = rect.min.y + 22.0;
 
-        // Etkileşim: Sürükleme veya Tıklama (Sadece pencere boyutlandırılmıyorsa)
         if !ignore_input && (response.dragged() || response.clicked()) {
             if let Some(pos) = response.interact_pointer_pos() {
                 let ratio = ((pos.x - track_start_x) / track_w).clamp(0.0, 1.0);
@@ -202,13 +263,11 @@ impl PoseaMixerApp {
         let current_ratio = (*val / 10.0).clamp(0.0, 1.0);
         let thumb_x = track_start_x + (current_ratio * track_w);
 
-        // 2. Pasif Kanal (Gri)
         painter.line_segment(
             [Pos2::new(track_start_x, track_y), Pos2::new(track_end_x, track_y)],
             Stroke::new(2.5, Color32::from_rgb(42, 44, 56)),
         );
 
-        // 3. Aktif Kanal (Coral Crimson Kırmızı)
         if current_ratio > 0.005 {
             painter.line_segment(
                 [Pos2::new(track_start_x, track_y), Pos2::new(thumb_x, track_y)],
@@ -216,13 +275,11 @@ impl PoseaMixerApp {
             );
         }
 
-        // 4. Halka Düğme (Thumb Ring: Dışı Kırmızı, İçi Koyu)
         let is_hovered = response.hovered();
         let r = if is_hovered { 6.0 } else { 5.0 };
         painter.circle_filled(Pos2::new(thumb_x, track_y), r, Color32::from_rgb(17, 18, 22));
         painter.circle_stroke(Pos2::new(thumb_x, track_y), r, Stroke::new(2.0, Theme::ACCENT_RED));
 
-        // 5. Değer Rozeti (Sağ Uçta Beyaz Rakam, asla üst üste binmez)
         let val_color = if *val > 0.0 { Color32::WHITE } else { Color32::from_rgb(130, 134, 150) };
         painter.text(
             Pos2::new(rect.max.x - 6.0, track_y),
@@ -241,7 +298,6 @@ impl PoseaMixerApp {
         let (rect, response) = ui.allocate_exact_size(Vec2::new(390.0, 26.0), Sense::click_and_drag());
         let painter = ui.painter_at(rect);
 
-        // Sol: Etiket
         painter.text(
             Pos2::new(rect.min.x, rect.center().y),
             egui::Align2::LEFT_CENTER,
@@ -269,13 +325,11 @@ impl PoseaMixerApp {
         let ratio = ((*val - min) / (max - min)).clamp(0.0, 1.0);
         let thumb_x = track_start_x + (ratio * track_w);
 
-        // Pasif kanal
         painter.line_segment(
             [Pos2::new(track_start_x, track_y), Pos2::new(track_end_x, track_y)],
             Stroke::new(2.2, Color32::from_rgb(42, 45, 58)),
         );
 
-        // Aktif kanal
         if ratio > 0.005 {
             painter.line_segment(
                 [Pos2::new(track_start_x, track_y), Pos2::new(thumb_x, track_y)],
@@ -283,12 +337,10 @@ impl PoseaMixerApp {
             );
         }
 
-        // Halka düğme
         let r = if response.hovered() { 5.6 } else { 4.6 };
         painter.circle_filled(Pos2::new(thumb_x, track_y), r, Color32::from_rgb(18, 19, 25));
         painter.circle_stroke(Pos2::new(thumb_x, track_y), r, Stroke::new(1.8, Theme::ACCENT_RED));
 
-        // Sağdaki değer yazısı
         painter.text(
             Pos2::new(rect.max.x - 4.0, track_y),
             egui::Align2::RIGHT_CENTER,
@@ -310,8 +362,7 @@ impl PoseaMixerApp {
             self.is_resizing_window = false;
         }
 
-        // Eğer kullanıcı zaten bir EQ bandını aktif olarak sürüklüyorsa, boyutlandırma tetikleme
-        if self.active_eq_band.is_some() {
+        if self.active_eq_band.is_some() || self.is_mini_mode {
             return false;
         }
 
@@ -346,6 +397,166 @@ impl PoseaMixerApp {
 
         self.is_resizing_window || is_on_border
     }
+
+    /// Ultra Kompakt Kayan Mini-Bar HUD Modu
+    fn render_mini_mode(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let total_w = ui.available_width();
+        let total_h = ui.available_height();
+        let rect = Rect::from_min_size(ui.min_rect().min, Vec2::new(total_w, total_h));
+        let painter = ui.painter_at(rect);
+
+        // Arka Plan Çerçevesi
+        painter.rect_filled(rect, 10.0, Theme::BG_DARK);
+        painter.rect_stroke(rect, 10.0, Stroke::new(1.0, Color32::from_rgb(40, 44, 58)), egui::StrokeKind::Inside);
+
+        // Sürüklenebilir Alan (Tüm Çubuk)
+        let drag_resp = ui.interact(rect, ui.make_persistent_id("mini_drag_area"), Sense::click_and_drag());
+        if drag_resp.dragged() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+
+        let mid_y = rect.center().y;
+
+        // 1. Sol: Logo (5-Çubuk Coral Crimson)
+        let lx = rect.min.x + 14.0;
+        painter.line_segment([Pos2::new(lx, mid_y + 3.0), Pos2::new(lx, mid_y - 3.0)], Stroke::new(2.0, Color32::from_rgb(216, 30, 72)));
+        painter.line_segment([Pos2::new(lx + 3.5, mid_y + 5.5), Pos2::new(lx + 3.5, mid_y - 5.5)], Stroke::new(2.0, Color32::from_rgb(255, 53, 98)));
+        painter.line_segment([Pos2::new(lx + 7.0, mid_y + 8.5), Pos2::new(lx + 7.0, mid_y - 8.5)], Stroke::new(2.2, Theme::ACCENT_RED));
+        painter.line_segment([Pos2::new(lx + 10.5, mid_y + 5.5), Pos2::new(lx + 10.5, mid_y - 5.5)], Stroke::new(2.0, Color32::from_rgb(255, 53, 98)));
+        painter.line_segment([Pos2::new(lx + 14.0, mid_y + 3.0), Pos2::new(lx + 14.0, mid_y - 3.0)], Stroke::new(2.0, Color32::from_rgb(216, 30, 72)));
+
+        // 2. Güç Butonu (IEEE 1621)
+        let pwr_x = lx + 36.0;
+        let pwr_center = Pos2::new(pwr_x, mid_y);
+        let pwr_rect = Rect::from_center_size(pwr_center, Vec2::new(26.0, 26.0));
+        let pwr_resp = ui.interact(pwr_rect, ui.make_persistent_id("mini_power_btn"), Sense::click());
+        let is_dsp_enabled = self.settings.read().enabled;
+
+        let (p_fill, p_stroke, icon_color) = if is_dsp_enabled {
+            (Color32::from_rgb(60, 18, 30), Theme::ACCENT_RED, Theme::ACCENT_RED)
+        } else {
+            (Color32::from_rgb(24, 26, 34), Color32::from_rgb(60, 64, 76), Color32::from_rgb(110, 115, 130))
+        };
+        painter.circle_filled(pwr_center, 12.0, p_fill);
+        painter.circle_stroke(pwr_center, 12.0, Stroke::new(1.5, p_stroke));
+
+        let p_r = 5.5;
+        let mut deg: f32 = -60.0;
+        while deg <= 240.0 {
+            let rad = deg.to_radians();
+            let rad2 = (deg + 15.0).to_radians();
+            painter.line_segment(
+                [
+                    Pos2::new(pwr_center.x + p_r * rad.cos(), pwr_center.y + p_r * rad.sin()),
+                    Pos2::new(pwr_center.x + p_r * rad2.cos(), pwr_center.y + p_r * rad2.sin()),
+                ],
+                Stroke::new(1.8, icon_color),
+            );
+            deg += 15.0;
+        }
+        painter.line_segment(
+            [Pos2::new(pwr_center.x, pwr_center.y - 6.0), Pos2::new(pwr_center.x, pwr_center.y + 0.5)],
+            Stroke::new(1.8, icon_color),
+        );
+
+        if pwr_resp.on_hover_text("DSP Güç / Bypass").clicked() {
+            let mut s = self.settings.write();
+            s.enabled = !s.enabled;
+            s.version += 1;
+        }
+
+        // 3. Preset Adı Rozeti (Tıklayınca sonrakine geçer)
+        let preset_btn_rect = Rect::from_min_size(Pos2::new(pwr_x + 22.0, mid_y - 14.0), Vec2::new(125.0, 28.0));
+        let pb_resp = ui.interact(preset_btn_rect, ui.make_persistent_id("mini_preset_btn"), Sense::click());
+        let pb_bg = if pb_resp.hovered() { Color32::from_rgb(32, 35, 46) } else { Color32::from_rgb(22, 24, 32) };
+        painter.rect_filled(preset_btn_rect, 6.0, pb_bg);
+        painter.rect_stroke(preset_btn_rect, 6.0, Stroke::new(1.0, Color32::from_rgb(45, 48, 62)), egui::StrokeKind::Inside);
+
+        let disp_preset = if self.selected_preset_name.len() > 14 {
+            format!("{}...", &self.selected_preset_name[..12])
+        } else {
+            self.selected_preset_name.clone()
+        };
+        painter.text(
+            Pos2::new(preset_btn_rect.min.x + 8.0, mid_y),
+            egui::Align2::LEFT_CENTER,
+            disp_preset,
+            egui::FontId::proportional(12.0),
+            Color32::WHITE,
+        );
+        painter.text(
+            Pos2::new(preset_btn_rect.max.x - 8.0, mid_y),
+            egui::Align2::RIGHT_CENTER,
+            "↻",
+            egui::FontId::proportional(13.0),
+            Theme::ACCENT_RED,
+        );
+        if pb_resp.on_hover_text("Sonraki Ön Ayara Geç (Ctrl+Alt+P)").clicked() {
+            let presets = ["General", "Movies", "Voice", "Music", "Gaming", "Bass Boost"];
+            let next = if let Some(pos) = presets.iter().position(|&p| p == self.selected_preset_name) {
+                presets[(pos + 1) % presets.len()]
+            } else {
+                "Music"
+            };
+            self.apply_preset_by_name(next);
+        }
+
+        // 4. Mini Canlı Spektrum Vizör Çubukları
+        let viz_x = preset_btn_rect.max.x + 12.0;
+        let viz_w = 70.0;
+        let num_bars = 12;
+        let bar_step = viz_w / num_bars as f32;
+        let bands = self.visualizer.get_bands();
+
+        for i in 0..num_bars {
+            let bx = viz_x + i as f32 * bar_step;
+            let mag = if is_dsp_enabled {
+                let bin_idx = (i * 5).min(NUM_SPECTRUM_BARS - 1);
+                (bands[bin_idx] * 2.8).clamp(0.08, 1.0)
+            } else {
+                0.08
+            };
+            let bar_h = 20.0 * mag;
+            let bar_y1 = mid_y + (bar_h * 0.5);
+            let bar_y2 = mid_y - (bar_h * 0.5);
+            let col = if is_dsp_enabled { Theme::ACCENT_RED } else { Color32::from_rgb(50, 54, 68) };
+            painter.line_segment([Pos2::new(bx + 2.0, bar_y1), Pos2::new(bx + 2.0, bar_y2)], Stroke::new(2.5, col));
+        }
+
+        // 5. Sağ Butonlar: Stüdyo Moduna Dön (⛶) ve Kapat (✕)
+        let rx = rect.max.x;
+
+        // ✕ Kapat Butonu
+        let close_rect = Rect::from_center_size(Pos2::new(rx - 16.0, mid_y), Vec2::new(22.0, 22.0));
+        let close_resp = ui.interact(close_rect, ui.make_persistent_id("mini_close_btn"), Sense::click());
+        if close_resp.hovered() {
+            painter.rect_filled(close_rect, 4.0, Color32::from_rgb(180, 30, 40));
+        }
+        painter.text(close_rect.center(), egui::Align2::CENTER_CENTER, "✕", egui::FontId::proportional(11.0), Color32::WHITE);
+        if close_resp.clicked() {
+            self.save_to_disk();
+            if self.minimize_to_tray {
+                self.is_window_visible = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            } else {
+                std::process::exit(0);
+            }
+        }
+
+        // ⛶ Stüdyo Moduna Dön Butonu
+        let expand_rect = Rect::from_center_size(Pos2::new(rx - 42.0, mid_y), Vec2::new(22.0, 22.0));
+        let expand_resp = ui.interact(expand_rect, ui.make_persistent_id("mini_expand_btn"), Sense::click());
+        if expand_resp.hovered() {
+            painter.rect_filled(expand_rect, 4.0, Theme::BG_CARD_HOVER);
+        }
+        painter.text(expand_rect.center(), egui::Align2::CENTER_CENTER, "⛶", egui::FontId::proportional(13.0), Color32::WHITE);
+        if expand_resp.on_hover_text("Tam Stüdyo Görünümünü Aç").clicked() {
+            self.is_mini_mode = false;
+            self.ui_dirty = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(760.0, 540.0)));
+            ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(Vec2::new(680.0, 480.0)));
+        }
+    }
 }
 
 impl eframe::App for PoseaMixerApp {
@@ -364,7 +575,45 @@ impl eframe::App for PoseaMixerApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
 
-        // 1. Sistem Tepsisi (Tray) Olaylarını Kontrol Et
+        // 1. Sistem Genelinde Arka Plan Kısayollarını İşle (Global Hotkeys)
+        while let Some(action) = self.hotkey_manager.poll_action() {
+            match action {
+                HotkeyAction::ToggleBypass => {
+                    let mut s = self.settings.write();
+                    s.enabled = !s.enabled;
+                    s.version += 1;
+                }
+                HotkeyAction::ToggleBassBoost => {
+                    let mut s = self.settings.write();
+                    if s.bass_boost > 0.5 {
+                        s.bass_boost = 0.0;
+                    } else {
+                        s.bass_boost = 8.0;
+                    }
+                    s.version += 1;
+                }
+                HotkeyAction::CyclePreset => {
+                    let presets = ["General", "Movies", "Voice", "Music", "Gaming", "Bass Boost"];
+                    let next = if let Some(pos) = presets.iter().position(|&p| p == self.selected_preset_name) {
+                        presets[(pos + 1) % presets.len()]
+                    } else {
+                        "Music"
+                    };
+                    self.apply_preset_by_name(next);
+                }
+                HotkeyAction::ToggleMute => {
+                    let mut s = self.settings.write();
+                    if s.master_volume > 0.001 {
+                        s.master_volume = 0.0;
+                    } else {
+                        s.master_volume = 10.0_f32.powf(self.master_volume_db / 20.0);
+                    }
+                    s.version += 1;
+                }
+            }
+        }
+
+        // 2. Sistem Tepsisi (Tray) Olaylarını Kontrol Et
         if let Some(ref tray) = self.tray_manager {
             match tray.check_events() {
                 TrayAction::ToggleShow => {
@@ -389,13 +638,12 @@ impl eframe::App for PoseaMixerApp {
             }
         }
 
-        // Pencere gizliyken dahi tepsi olaylarını yakalamak için hafif polling iste
         if !self.is_window_visible {
             ctx.request_repaint_after(Duration::from_millis(50));
             return;
         }
 
-        // 2. Pencere Kapatma (X Butonu) Yakalama
+        // 3. Pencere Kapatma (X Butonu) Yakalama
         if ctx.input(|i| i.viewport().close_requested()) {
             self.save_to_disk();
             if self.minimize_to_tray {
@@ -409,10 +657,20 @@ impl eframe::App for PoseaMixerApp {
             }
         }
 
+        // 4. Mini-Bar HUD Modu Aktifse Kompakt Çubuğu Çiz
+        if self.is_mini_mode {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(Color32::TRANSPARENT).inner_margin(Margin::ZERO))
+                .show(ui, |ui| {
+                    self.render_mini_mode(ui, &ctx);
+                });
+            return;
+        }
+
         let full_rect = ui.ctx().viewport_rect();
         let is_resizing_or_border = self.handle_window_resizing(&ctx, full_rect);
 
-        // Ana Konteyner: Pencerenin TÜM genişlik ve yüksekliğini doldurur (Asla siyah boşluk kalmaz)
+        // Ana Konteyner: Pencerenin TÜM genişlik ve yüksekliğini doldurur
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
@@ -434,7 +692,6 @@ impl eframe::App for PoseaMixerApp {
                 let logo_x = titlebar_rect.min.x + 6.0;
                 let logo_y = titlebar_rect.center().y;
 
-                // 5 Coral Crimson Çizgi Logo (Resmi Simge ve Sistem Tepsisi ile 100% Uyumlu)
                 tb_painter.line_segment([Pos2::new(logo_x, logo_y + 3.5), Pos2::new(logo_x, logo_y - 3.5)], Stroke::new(2.2, Color32::from_rgb(216, 30, 72)));
                 tb_painter.line_segment([Pos2::new(logo_x + 4.0, logo_y + 6.5), Pos2::new(logo_x + 4.0, logo_y - 6.5)], Stroke::new(2.2, Color32::from_rgb(255, 53, 98)));
                 tb_painter.line_segment([Pos2::new(logo_x + 8.0, logo_y + 9.5), Pos2::new(logo_x + 8.0, logo_y - 9.5)], Stroke::new(2.4, Theme::ACCENT_RED));
@@ -464,11 +721,11 @@ impl eframe::App for PoseaMixerApp {
                 tb_painter.line_segment([Pos2::new(hx1, hy - 5.0), Pos2::new(hx2, hy - 5.0)], Stroke::new(2.0, hb_color));
                 tb_painter.line_segment([Pos2::new(hx1, hy),       Pos2::new(hx2, hy)],       Stroke::new(2.0, hb_color));
                 tb_painter.line_segment([Pos2::new(hx1, hy + 5.0), Pos2::new(hx2, hy + 5.0)], Stroke::new(2.0, hb_color));
-                if hamburger_resp.on_hover_text("Ayarlar & Tercihler").clicked() {
+                if hamburger_resp.on_hover_text("Ayarlar, Karıştırıcı & Tercihler").clicked() {
                     self.show_preferences_modal = true;
                 }
 
-                // Sağ Taraf: Güç Butonu ve Pencere Kontrolleri
+                // Sağ Taraf: Kontroller
                 let right_end = titlebar_rect.max.x;
 
                 // ✕ Kapat Butonu
@@ -488,7 +745,7 @@ impl eframe::App for PoseaMixerApp {
                     }
                 }
 
-                // 🗖 / ❐ Boyutlandırma (Büyüt / Geri Yükle) Butonu
+                // 🗖 / ❐ Büyüt Butonu
                 let is_max = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
                 let max_rect = Rect::from_min_size(Pos2::new(right_end - 54.0, logo_y - 12.0), Vec2::new(24.0, 24.0));
                 let max_resp = ui.interact(max_rect, ui.make_persistent_id("win_max_btn"), Sense::click());
@@ -513,8 +770,22 @@ impl eframe::App for PoseaMixerApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 }
 
-                // ⏻ Kusursuz IEEE 1621 Güç Butonu (Saat 12 yönü açık daire ve ortadan inen çubuk)
-                let pwr_center = Pos2::new(right_end - 120.0, logo_y);
+                // ⛶ Mini Mod HUD Butonu
+                let mini_rect = Rect::from_min_size(Pos2::new(right_end - 110.0, logo_y - 12.0), Vec2::new(24.0, 24.0));
+                let mini_resp = ui.interact(mini_rect, ui.make_persistent_id("win_mini_btn"), Sense::click());
+                if mini_resp.hovered() {
+                    tb_painter.rect_filled(mini_rect, 4.0, Theme::BG_CARD_HOVER);
+                }
+                tb_painter.text(mini_rect.center(), egui::Align2::CENTER_CENTER, "⛶", egui::FontId::proportional(13.0), Color32::from_rgb(200, 204, 218));
+                if mini_resp.on_hover_text("Kayan Mini-Bar Moduna Geç (HUD)").clicked() {
+                    self.is_mini_mode = true;
+                    self.ui_dirty = true;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(Vec2::new(360.0, 68.0)));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(Vec2::new(380.0, 72.0)));
+                }
+
+                // ⏻ Güç Butonu (IEEE 1621)
+                let pwr_center = Pos2::new(right_end - 146.0, logo_y);
                 let pwr_rect = Rect::from_center_size(pwr_center, Vec2::new(32.0, 32.0));
                 let pwr_resp = ui.interact(pwr_rect, ui.make_persistent_id("main_power_btn"), Sense::click());
                 let is_dsp_enabled = self.settings.read().enabled;
@@ -548,16 +819,16 @@ impl eframe::App for PoseaMixerApp {
                     Stroke::new(2.2, icon_color),
                 );
 
-                if pwr_resp.on_hover_text(if is_dsp_enabled { "DSP Açık (Kapatmak için tıklayın)" } else { "Bypass (Açmak için tıklayın)" }).clicked() {
+                if pwr_resp.on_hover_text(if is_dsp_enabled { "DSP Açık (Kapatmak için tıklayın / Ctrl+Alt+Space)" } else { "Bypass (Açmak için tıklayın / Ctrl+Alt+Space)" }).clicked() {
                     let mut s = self.settings.write();
                     s.enabled = !s.enabled;
                     s.version += 1;
                 }
 
-                // Orta Boş Alan: Pencereyi Sürükleme ve Çift Tıklama ile Büyütme
+                // Başlık Çubuğu Sürükleme Alanı
                 let drag_rect = Rect::from_min_max(
                     Pos2::new(logo_x + 145.0, titlebar_rect.min.y),
-                    Pos2::new(right_end - 145.0, titlebar_rect.max.y),
+                    Pos2::new(right_end - 170.0, titlebar_rect.max.y),
                 );
                 let drag_resp = ui.interact(drag_rect, ui.make_persistent_id("win_drag_area"), Sense::click_and_drag());
                 if drag_resp.double_clicked() {
@@ -582,10 +853,16 @@ impl eframe::App for PoseaMixerApp {
                     ui.painter().rect_filled(preset_rect, 8.0, p_bg);
                     ui.painter().rect_stroke(preset_rect, 8.0, Stroke::new(1.0, Color32::from_rgb(34, 36, 48)), egui::StrokeKind::Inside);
 
+                    let p_display = if self.selected_preset_name.len() > 30 {
+                        format!("{}...", &self.selected_preset_name[..27])
+                    } else {
+                        self.selected_preset_name.clone()
+                    };
+
                     ui.painter().text(
                         Pos2::new(preset_rect.min.x + 14.0, preset_rect.center().y),
                         egui::Align2::LEFT_CENTER,
-                        &self.selected_preset_name,
+                        p_display,
                         egui::FontId::proportional(14.0),
                         Color32::WHITE,
                     );
@@ -615,7 +892,7 @@ impl eframe::App for PoseaMixerApp {
                     ui.painter().rect_stroke(dev_rect, 8.0, Stroke::new(1.0, Color32::from_rgb(34, 36, 48)), egui::StrokeKind::Inside);
 
                     let cur_out = self.selected_output.read().clone().unwrap_or_else(|| "Otomatik Donanım Hoparlörü".to_string());
-                    let display_name = if cur_out.len() > 40 { format!("{}...", &cur_out[..37]) } else { cur_out.clone() };
+                    let display_name = if cur_out.len() > 38 { format!("{}...", &cur_out[..35]) } else { cur_out.clone() };
 
                     ui.painter().text(
                         Pos2::new(dev_rect.min.x + 14.0, dev_rect.center().y),
@@ -651,13 +928,12 @@ impl eframe::App for PoseaMixerApp {
                 ui.add_space(8.0);
 
                 // --- 4. ALT BÖLÜM: 5 KAYDIRICI & 31-BANT GRAPHIC EQUALIZER ---
-                // ui.available_height() o anda kalan gerçek piksel yüksekliğini verir (Asla taşmaz)
                 let bottom_h = (ui.available_height() - 6.0).max(180.0);
                 let left_col_w = (total_w * 0.28).clamp(240.0, 290.0);
                 let right_col_w = (total_w - left_col_w - 14.0).max(380.0);
 
                 ui.horizontal_top(|ui| {
-                    // --- SOL SÜTUN: 5 Ana Geliştirme Kaydırıcısı (Dikey Orantılı Responsive Boşluk) ---
+                    // Sol Sütun: 5 Ana Geliştirme Kaydırıcısı
                     ui.allocate_ui_with_layout(
                         Vec2::new(left_col_w, bottom_h),
                         egui::Layout::top_down(egui::Align::LEFT),
@@ -672,11 +948,11 @@ impl eframe::App for PoseaMixerApp {
                             let available_gap_space = (bottom_h - total_sliders_h).max(0.0);
                             let gap = (available_gap_space / 4.0).clamp(2.0, 26.0);
 
-                            if Self::render_fx_slider(ui, "Netlik", &mut s.clarity, is_resizing_or_border) { changed = true; }
+                            if Self::render_fx_slider(ui, "Netlik (Clarity)", &mut s.clarity, is_resizing_or_border) { changed = true; }
                             ui.add_space(gap);
-                            if Self::render_fx_slider(ui, "Ortam", &mut s.ambience, is_resizing_or_border) { changed = true; }
+                            if Self::render_fx_slider(ui, "Ortam (Ambience)", &mut s.ambience, is_resizing_or_border) { changed = true; }
                             ui.add_space(gap);
-                            if Self::render_fx_slider(ui, "Çevresel Ses", &mut s.surround, is_resizing_or_border) { changed = true; }
+                            if Self::render_fx_slider(ui, "Çevresel Ses (Surround)", &mut s.surround, is_resizing_or_border) { changed = true; }
                             ui.add_space(gap);
                             if Self::render_fx_slider(ui, "Dinamik Güçlendirme", &mut s.dynamic_boost, is_resizing_or_border) { changed = true; }
                             ui.add_space(gap);
@@ -690,7 +966,7 @@ impl eframe::App for PoseaMixerApp {
 
                     ui.add_space(14.0);
 
-                    // --- SAĞ SÜTUN: 31-Bant Parametrik ISO Grafik Ekolayzır (Dikey Boyutla Birlikte Büyür) ---
+                    // Sağ Sütun: 31-Bant Parametrik ISO Grafik Ekolayzır (Shift+Drag Serbest Çizim Destekli)
                     ui.allocate_ui_with_layout(
                         Vec2::new(right_col_w, bottom_h),
                         egui::Layout::top_down(egui::Align::LEFT),
@@ -703,7 +979,7 @@ impl eframe::App for PoseaMixerApp {
                     );
                 });
 
-                // --- 5. ÖZEL PRESET AÇILIR MENÜSÜ ---
+                // --- 5. ÖZEL PRESET AÇILIR MENÜSÜ (Kategori Başlıkları, AutoEQ & Özel Profiller) ---
                 if let Some(pos) = open_preset_menu_pos {
                     egui::Area::new(ui.make_persistent_id("preset_popup_area"))
                         .order(egui::Order::Foreground)
@@ -715,71 +991,167 @@ impl eframe::App for PoseaMixerApp {
                                 .corner_radius(CornerRadius::same(6))
                                 .inner_margin(Margin::symmetric(0, 4))
                                 .show(ui, |ui| {
-                                    ui.set_width(half_w);
-                                    let presets = [
-                                        ("General", "general"),
-                                        ("Movies", "movies"),
-                                        ("Voice", "voice"),
-                                        ("Music", "music"),
-                                        ("Gaming", "gaming"),
-                                        ("Volume Boost", "volume_boost"),
-                                        ("Bass Boost", "bass_boost"),
-                                        ("Streaming Video", "streaming"),
-                                        ("Default (Flat)", "default"),
-                                    ];
+                                    ui.set_width(half_w.max(300.0));
 
-                                    for (name, key) in presets {
-                                        let is_active = self.selected_preset_name == name;
-                                        let (item_rect, item_resp) = ui.allocate_exact_size(Vec2::new(half_w, 32.0), Sense::click());
+                                    egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                                        let std_presets = [
+                                            ("General", "General"),
+                                            ("Movies", "Movies"),
+                                            ("Voice (Konuşma Netleştirici)", "Voice"),
+                                            ("Music", "Music"),
+                                            ("Gaming", "Gaming"),
+                                            ("Volume Boost", "Volume Boost"),
+                                            ("Bass Boost", "Bass Boost"),
+                                            ("Streaming Video", "Streaming Video"),
+                                            ("Default (Flat)", "Default (Flat)"),
+                                        ];
 
-                                        let bg = if is_active {
-                                            Theme::ACCENT_RED
-                                        } else if item_resp.hovered() {
-                                            Color32::from_rgb(26, 28, 36)
-                                        } else {
-                                            Color32::TRANSPARENT
-                                        };
+                                        ui.add_space(3.0);
+                                        ui.label(RichText::new("  YERLEŞİK ÖN AYARLAR").size(10.5).color(Color32::from_rgb(140, 144, 165)).strong());
 
-                                        ui.painter().rect_filled(item_rect, 0.0, bg);
+                                        for (label, key) in std_presets {
+                                            let is_active = self.selected_preset_name == key;
+                                            let (item_rect, item_resp) = ui.allocate_exact_size(Vec2::new(half_w.max(300.0) - 12.0, 30.0), Sense::click());
 
-                                        let text_x = if is_active { item_rect.min.x + 32.0 } else { item_rect.min.x + 16.0 };
-                                        if is_active {
+                                            let bg = if is_active {
+                                                Theme::ACCENT_RED
+                                            } else if item_resp.hovered() {
+                                                Color32::from_rgb(26, 28, 36)
+                                            } else {
+                                                Color32::TRANSPARENT
+                                            };
+
+                                            ui.painter().rect_filled(item_rect, 4.0, bg);
+
+                                            let text_x = if is_active { item_rect.min.x + 28.0 } else { item_rect.min.x + 14.0 };
+                                            if is_active {
+                                                ui.painter().text(
+                                                    Pos2::new(item_rect.min.x + 12.0, item_rect.center().y),
+                                                    egui::Align2::LEFT_CENTER,
+                                                    "✓",
+                                                    egui::FontId::proportional(13.0),
+                                                    Color32::WHITE,
+                                                );
+                                            }
+
                                             ui.painter().text(
-                                                Pos2::new(item_rect.min.x + 14.0, item_rect.center().y),
+                                                Pos2::new(text_x, item_rect.center().y),
                                                 egui::Align2::LEFT_CENTER,
-                                                "✓",
-                                                egui::FontId::proportional(14.0),
+                                                label,
+                                                egui::FontId::proportional(13.0),
                                                 Color32::WHITE,
                                             );
-                                        }
 
-                                        ui.painter().text(
-                                            Pos2::new(text_x, item_rect.center().y),
-                                            egui::Align2::LEFT_CENTER,
-                                            name,
-                                            egui::FontId::proportional(13.5),
-                                            Color32::WHITE,
-                                        );
-
-                                        if item_resp.clicked() {
-                                            self.selected_preset_name = name.to_string();
-                                            self.preset_dropdown_open = false;
-                                            self.ui_dirty = true;
-                                            let mut s = self.settings.write();
-                                            match key {
-                                                "general" => s.preset_general(),
-                                                "movies" => s.preset_movies(),
-                                                "voice" => s.preset_voice(),
-                                                "music" => s.preset_music(),
-                                                "gaming" => s.preset_gaming(),
-                                                "volume_boost" => s.preset_volume_boost(),
-                                                "bass_boost" => s.preset_bass_boost(),
-                                                "streaming" => s.preset_streaming(),
-                                                "default" => s.preset_default(),
-                                                _ => {}
+                                            if item_resp.clicked() {
+                                                self.apply_preset_by_name(key);
+                                                self.preset_dropdown_open = false;
                                             }
                                         }
-                                    }
+
+                                        // Özel Kullanıcı Ön Ayarları
+                                        if !self.custom_presets.is_empty() {
+                                            ui.add_space(6.0);
+                                            ui.separator();
+                                            ui.add_space(3.0);
+                                            ui.label(RichText::new("  KULLANICI ÖN AYARLARI").size(10.5).color(Color32::from_rgb(140, 144, 165)).strong());
+
+                                            let mut clicked_custom = None;
+                                            for cp in &self.custom_presets {
+                                                let is_active = self.selected_preset_name == cp.name;
+                                                let (item_rect, item_resp) = ui.allocate_exact_size(Vec2::new(half_w.max(300.0) - 12.0, 30.0), Sense::click());
+
+                                                let bg = if is_active {
+                                                    Theme::ACCENT_RED
+                                                } else if item_resp.hovered() {
+                                                    Color32::from_rgb(26, 28, 36)
+                                                } else {
+                                                    Color32::TRANSPARENT
+                                                };
+
+                                                ui.painter().rect_filled(item_rect, 4.0, bg);
+                                                let text_x = if is_active { item_rect.min.x + 28.0 } else { item_rect.min.x + 14.0 };
+                                                if is_active {
+                                                    ui.painter().text(
+                                                        Pos2::new(item_rect.min.x + 12.0, item_rect.center().y),
+                                                        egui::Align2::LEFT_CENTER,
+                                                        "✓",
+                                                        egui::FontId::proportional(13.0),
+                                                        Color32::WHITE,
+                                                    );
+                                                }
+
+                                                ui.painter().text(
+                                                    Pos2::new(text_x, item_rect.center().y),
+                                                    egui::Align2::LEFT_CENTER,
+                                                    format!("💾 {}", cp.name),
+                                                    egui::FontId::proportional(13.0),
+                                                    Color32::WHITE,
+                                                );
+
+                                                if item_resp.clicked() {
+                                                    clicked_custom = Some(cp.name.clone());
+                                                }
+                                            }
+                                            if let Some(name) = clicked_custom {
+                                                self.apply_preset_by_name(&name);
+                                                self.preset_dropdown_open = false;
+                                            }
+                                        }
+
+                                        // AutoEQ Harman Hedef Profilleri
+                                        ui.add_space(6.0);
+                                        ui.separator();
+                                        ui.add_space(3.0);
+                                        ui.label(RichText::new("  🎧 AUTOEQ KULAKLIK PROFİLLERİ (HARMAN)").size(10.5).color(Theme::ACCENT_RED).strong());
+
+                                        let mut clicked_autoeq = None;
+                                        for profile in AutoEqDatabase::get_profiles() {
+                                            let profile_label = format!("AutoEQ: {}", profile.model);
+                                            let is_active = self.selected_preset_name == profile_label;
+                                            let (item_rect, item_resp) = ui.allocate_exact_size(Vec2::new(half_w.max(300.0) - 12.0, 30.0), Sense::click());
+
+                                            let bg = if is_active {
+                                                Theme::ACCENT_RED
+                                            } else if item_resp.hovered() {
+                                                Color32::from_rgb(26, 28, 36)
+                                            } else {
+                                                Color32::TRANSPARENT
+                                            };
+
+                                            ui.painter().rect_filled(item_rect, 4.0, bg);
+
+                                            let text_x = if is_active { item_rect.min.x + 28.0 } else { item_rect.min.x + 14.0 };
+                                            if is_active {
+                                                ui.painter().text(
+                                                    Pos2::new(item_rect.min.x + 12.0, item_rect.center().y),
+                                                    egui::Align2::LEFT_CENTER,
+                                                    "✓",
+                                                    egui::FontId::proportional(13.0),
+                                                    Color32::WHITE,
+                                                );
+                                            }
+
+                                            ui.painter().text(
+                                                Pos2::new(text_x, item_rect.center().y),
+                                                egui::Align2::LEFT_CENTER,
+                                                format!("{} - {}", profile.brand, profile.model),
+                                                egui::FontId::proportional(12.5),
+                                                Color32::WHITE,
+                                            );
+
+                                            if item_resp.clicked() {
+                                                clicked_autoeq = Some((profile_label, profile));
+                                            }
+                                        }
+
+                                        if let Some((label, profile)) = clicked_autoeq {
+                                            self.selected_preset_name = label;
+                                            self.settings.write().apply_autoeq_profile(profile);
+                                            self.preset_dropdown_open = false;
+                                            self.ui_dirty = true;
+                                        }
+                                        ui.add_space(4.0);
+                                    });
                                 });
                         });
                 }
@@ -845,14 +1217,14 @@ impl eframe::App for PoseaMixerApp {
                 }
             });
 
-        // --- 7. TERCİHLER MODAL DİYALOĞU ---
+        // --- 7. TERCİHLER MODAL DİYALOĞU (Ses, Uygulamalar, Ön Ayarlar, Kısayollar, Genel, Yardım) ---
         if self.show_preferences_modal {
             egui::Window::new("preferences_modal")
                 .title_bar(false)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .fixed_size([560.0, 410.0])
+                .fixed_size([580.0, 430.0])
                 .frame(
                     egui::Frame::new()
                         .fill(Color32::from_rgb(18, 19, 25))
@@ -864,7 +1236,7 @@ impl eframe::App for PoseaMixerApp {
                     // Modal Başlığı
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("ılı.").size(18.0).strong().color(Theme::ACCENT_RED));
-                        ui.label(RichText::new("Tercihler").size(16.0).strong().color(Color32::WHITE));
+                        ui.label(RichText::new("Tercihler & Gelişmiş Ayarlar").size(16.0).strong().color(Color32::WHITE));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let (c_rect, c_resp) = ui.allocate_exact_size(Vec2::new(26.0, 26.0), Sense::click());
                             if c_resp.hovered() {
@@ -884,18 +1256,21 @@ impl eframe::App for PoseaMixerApp {
                     // 2-Sütunlu Gövde: Sol Menü & Sağ İçerik
                     ui.horizontal(|ui| {
                         // Sol Navigasyon Menüsü
-                        ui.allocate_ui_with_layout(Vec2::new(115.0, 340.0), egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                        ui.allocate_ui_with_layout(Vec2::new(120.0, 350.0), egui::Layout::top_down(egui::Align::LEFT), |ui| {
                             let mut nav_item = |ui: &mut egui::Ui, label: &str, tab: PreferencesTab| {
                                 let is_sel = self.pref_active_tab == tab;
                                 let color = if is_sel { Color32::WHITE } else { Color32::from_rgb(160, 164, 178) };
                                 let bg = if is_sel { Color32::from_rgb(34, 37, 48) } else { Color32::TRANSPARENT };
-                                if ui.add_sized([110.0, 34.0], egui::Button::new(RichText::new(label).size(13.5).strong().color(color)).fill(bg)).clicked() {
+                                if ui.add_sized([115.0, 32.0], egui::Button::new(RichText::new(label).size(13.0).strong().color(color)).fill(bg)).clicked() {
                                     self.pref_active_tab = tab;
                                 }
-                                ui.add_space(4.0);
+                                ui.add_space(3.0);
                             };
 
                             nav_item(ui, "🔊  Ses", PreferencesTab::Audio);
+                            nav_item(ui, "🎚  Uygulamalar", PreferencesTab::Apps);
+                            nav_item(ui, "💾  Ön Ayarlar", PreferencesTab::Presets);
+                            nav_item(ui, "⌨  Kısayollar", PreferencesTab::Hotkeys);
                             nav_item(ui, "⚙  Genel", PreferencesTab::General);
                             nav_item(ui, "💬  Yardım", PreferencesTab::Help);
                         });
@@ -903,16 +1278,16 @@ impl eframe::App for PoseaMixerApp {
                         ui.separator();
                         ui.add_space(8.0);
 
-                        // Sağ İçerik Alanı (Satır Satır Düzen)
-                        ui.allocate_ui_with_layout(Vec2::new(395.0, 340.0), egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                        // Sağ İçerik Alanı
+                        ui.allocate_ui_with_layout(Vec2::new(410.0, 350.0), egui::Layout::top_down(egui::Align::LEFT), |ui| {
                             ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
 
                             match self.pref_active_tab {
                                 PreferencesTab::Audio => {
-                                    ui.label(RichText::new("Ses").size(15.0).strong().color(Color32::WHITE));
+                                    ui.label(RichText::new("Ses & Dinamik Seviye Motoru").size(15.0).strong().color(Color32::WHITE));
                                     ui.add_space(2.0);
 
-                                    // 1. Tercih Edilen Çıkış
+                                    // Tercih Edilen Çıkış
                                     ui.horizontal(|ui| {
                                         ui.label(RichText::new("Tercih edilen çıkış:").size(12.0).color(Color32::from_rgb(170, 174, 188)));
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -933,19 +1308,7 @@ impl eframe::App for PoseaMixerApp {
                                         });
                                     });
 
-                                    // 2. Ekolayzır: 31 bant
-                                    ui.horizontal(|ui| {
-                                        ui.label(RichText::new("Ekolayzır:").size(12.0).color(Color32::from_rgb(170, 174, 188)));
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            let (e_rect, _) = ui.allocate_exact_size(Vec2::new(230.0, 26.0), Sense::hover());
-                                            ui.painter().rect_filled(e_rect, 4.0, Color32::from_rgb(14, 15, 20));
-                                            ui.painter().rect_stroke(e_rect, 4.0, Stroke::new(1.0, Color32::from_rgb(38, 40, 52)), egui::StrokeKind::Inside);
-                                            ui.painter().text(Pos2::new(e_rect.min.x + 10.0, e_rect.center().y), egui::Align2::LEFT_CENTER, "31 bant", egui::FontId::proportional(12.5), Color32::WHITE);
-                                            ui.painter().text(Pos2::new(e_rect.max.x - 12.0, e_rect.center().y), egui::Align2::RIGHT_CENTER, "⌵", egui::FontId::proportional(12.0), Theme::ACCENT_RED);
-                                        });
-                                    });
-
-                                    // 3. Ana Ses Seviyesi Slider
+                                    // Ana Ses Seviyesi Slider
                                     let mut s = self.settings.write();
                                     let vol_str = format!("{:.0} dB", self.master_volume_db);
                                     if Self::render_pref_slider(ui, "Ana ses seviyesi:", &mut self.master_volume_db, -12.0, 12.0, &vol_str) {
@@ -954,21 +1317,27 @@ impl eframe::App for PoseaMixerApp {
                                         self.ui_dirty = true;
                                     }
 
-                                    // 4. Normalizasyon Slider
+                                    // Normalizasyon Slider
                                     let norm_str = format!("{:.0} dB", self.normalization_db);
-                                    if Self::render_pref_slider(ui, "Normalizasyon:", &mut self.normalization_db, 0.0, 12.0, &norm_str) {
+                                    if Self::render_pref_slider(ui, "Loudness Normalizasyon:", &mut self.normalization_db, 0.0, 12.0, &norm_str) {
+                                        s.normalization_db = self.normalization_db;
+                                        s.version += 1;
                                         self.ui_dirty = true;
                                     }
 
-                                    // 5. Filtre Q Slider
+                                    // Filtre Q Slider
                                     let q_str = format!("{:.1}x", self.filter_q);
-                                    if Self::render_pref_slider(ui, "Filtre Q:", &mut self.filter_q, 0.5, 3.0, &q_str) {
+                                    if Self::render_pref_slider(ui, "Filtre Q (Bant Genişliği):", &mut self.filter_q, 0.5, 3.0, &q_str) {
+                                        s.filter_q = self.filter_q;
+                                        s.version += 1;
                                         self.ui_dirty = true;
                                     }
 
-                                    // 6. Denge (Sol - Sağ) Slider
+                                    // Denge (Sol - Sağ) Slider
                                     let bal_str = format!("{:.0} dB", self.balance * 6.0);
-                                    if Self::render_pref_slider(ui, "Denge:", &mut self.balance, -1.0, 1.0, &bal_str) {
+                                    if Self::render_pref_slider(ui, "Denge (Sol - Sağ):", &mut self.balance, -1.0, 1.0, &bal_str) {
+                                        s.balance = self.balance;
+                                        s.version += 1;
                                         self.ui_dirty = true;
                                     }
 
@@ -979,26 +1348,195 @@ impl eframe::App for PoseaMixerApp {
                                     ui.painter().text(Pos2::new(track_x1, sub_rect.center().y), egui::Align2::LEFT_CENTER, "Sol", egui::FontId::proportional(9.0), Color32::from_rgb(110, 114, 130));
                                     ui.painter().text(Pos2::new(track_x2, sub_rect.center().y), egui::Align2::RIGHT_CENTER, "Sağ", egui::FontId::proportional(9.0), Color32::from_rgb(110, 114, 130));
 
-                                    ui.add_space(8.0);
+                                    ui.add_space(6.0);
 
-                                    // 7. İki Büyük Aksiyon Butonu
-                                    if ui.add_sized([390.0, 32.0], egui::Button::new(RichText::new("Varsayılanları geri yükle").size(13.0).strong().color(Color32::WHITE)).fill(Theme::ACCENT_RED)).clicked() {
+                                    // İki Büyük Aksiyon Butonu
+                                    if ui.add_sized([390.0, 30.0], egui::Button::new(RichText::new("Varsayılanları Geri Yükle").size(13.0).strong().color(Color32::WHITE)).fill(Theme::ACCENT_RED)).clicked() {
                                         self.master_volume_db = 0.0;
                                         self.normalization_db = 0.0;
                                         self.filter_q = 1.0;
                                         self.balance = 0.0;
                                         s.master_volume = 1.0;
+                                        s.normalization_db = 0.0;
+                                        s.filter_q = 1.0;
+                                        s.balance = 0.0;
                                         s.version += 1;
                                         self.ui_dirty = true;
                                     }
 
-                                    ui.add_space(4.0);
-
-                                    if ui.add_sized([390.0, 32.0], egui::Button::new(RichText::new("Ön Ayarları fabrika ayarlara sıfırlayın").size(13.0).color(Color32::WHITE)).fill(Color32::from_rgb(120, 32, 46))).clicked() {
+                                    if ui.add_sized([390.0, 30.0], egui::Button::new(RichText::new("Ön Ayarları Fabrika Ayarlarına Sıfırla").size(13.0).color(Color32::WHITE)).fill(Color32::from_rgb(120, 32, 46))).clicked() {
                                         s.preset_default();
                                         self.selected_preset_name = "Default (Flat)".to_string();
                                         self.ui_dirty = true;
                                     }
+                                }
+                                PreferencesTab::Apps => {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new("Uygulama Başına Ses Karıştırıcısı").size(15.0).strong().color(Color32::WHITE));
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if ui.button("🔄 Tara").clicked() || self.last_session_scan.elapsed() > Duration::from_secs(3) {
+                                                self.cached_app_sessions = session_mixer::list_active_app_sessions();
+                                                self.last_session_scan = Instant::now();
+                                            }
+                                        });
+                                    });
+                                    ui.add_space(2.0);
+                                    ui.label(RichText::new("Windows WASAPI oturumlarında çalan uygulamaların sesini ayrı ayrı ayarlayın:").size(11.5).color(Color32::from_rgb(150, 154, 170)));
+                                    ui.add_space(4.0);
+
+                                    egui::ScrollArea::vertical().max_height(270.0).show(ui, |ui| {
+                                        if self.cached_app_sessions.is_empty() {
+                                            ui.add_space(20.0);
+                                            ui.vertical_centered(|ui| {
+                                                ui.label(RichText::new("Şu anda ses çalan harici bir uygulama algılanmadı.").color(Theme::TEXT_MUTED));
+                                                ui.label(RichText::new("Müzik, tarayıcı veya oyun başlattığınızda burada listelenecektir.").size(11.0).color(Theme::TEXT_MUTED));
+                                            });
+                                        } else {
+                                            for session in &mut self.cached_app_sessions {
+                                                ui.horizontal(|ui| {
+                                                    let app_icon = if session.name.to_lowercase().contains("chrome") || session.name.to_lowercase().contains("brave") || session.name.to_lowercase().contains("edge") {
+                                                        "🌐"
+                                                    } else if session.name.to_lowercase().contains("spotify") {
+                                                        "🎵"
+                                                    } else if session.name.to_lowercase().contains("discord") {
+                                                        "💬"
+                                                    } else {
+                                                        "🔊"
+                                                    };
+
+                                                    let disp_name = if session.name.len() > 18 { format!("{}...", &session.name[..16]) } else { session.name.clone() };
+                                                    ui.label(RichText::new(format!("{} {}", app_icon, disp_name)).size(12.5).color(Color32::WHITE));
+
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        ui.label(RichText::new(format!("{:.0}%", session.volume * 100.0)).size(11.0).color(Theme::TEXT_SECONDARY));
+                                                        let mut vol = session.volume;
+                                                        if ui.add(egui::Slider::new(&mut vol, 0.0..=1.0).show_value(false)).changed() {
+                                                            session_mixer::set_app_volume(session.pid, vol);
+                                                            session.volume = vol;
+                                                        }
+                                                    });
+                                                });
+                                                ui.separator();
+                                            }
+                                        }
+                                    });
+                                }
+                                PreferencesTab::Presets => {
+                                    ui.label(RichText::new("Özel Ön Ayarlar & Profil Yöneticisi").size(15.0).strong().color(Color32::WHITE));
+                                    ui.add_space(2.0);
+
+                                    // Yeni Preset Kaydetme Satırı
+                                    ui.horizontal(|ui| {
+                                        ui.add(egui::TextEdit::singleline(&mut self.new_preset_name_input).hint_text("Yeni ön ayar adı...").desired_width(240.0));
+                                        if ui.button(RichText::new("💾 Kaydet").strong().color(Color32::WHITE)).clicked() {
+                                            let name = self.new_preset_name_input.trim().to_string();
+                                            if !name.is_empty() {
+                                                let s = self.settings.read();
+                                                let cp = CustomPreset {
+                                                    name: name.clone(),
+                                                    clarity: s.clarity,
+                                                    ambience: s.ambience,
+                                                    surround: s.surround,
+                                                    dynamic_boost: s.dynamic_boost,
+                                                    bass_boost: s.bass_boost,
+                                                    eq_bands: s.eq_bands,
+                                                };
+                                                self.custom_presets.retain(|p| p.name != name);
+                                                self.custom_presets.push(cp);
+                                                self.selected_preset_name = name;
+                                                self.new_preset_name_input.clear();
+                                                self.preset_status_msg = Some(("Ön ayar başarıyla kaydedildi!".to_string(), Instant::now()));
+                                                self.ui_dirty = true;
+                                            }
+                                        }
+                                    });
+
+                                    if let Some((msg, time)) = &self.preset_status_msg {
+                                        if time.elapsed() < Duration::from_secs(3) {
+                                            ui.label(RichText::new(msg).size(11.5).color(Theme::ACCENT_GREEN));
+                                        }
+                                    }
+
+                                    ui.add_space(4.0);
+                                    ui.separator();
+                                    ui.add_space(4.0);
+
+                                    ui.label(RichText::new("Kayıtlı Özel Ön Ayarlarınız:").size(12.0).strong().color(Color32::from_rgb(180, 184, 200)));
+
+                                    egui::ScrollArea::vertical().max_height(200.0).show(ui, |ui| {
+                                        if self.custom_presets.is_empty() {
+                                            ui.label(RichText::new("Henüz özel bir ön ayar kaydetmediniz.").color(Theme::TEXT_MUTED));
+                                        } else {
+                                            let mut to_delete = None;
+                                            let mut to_export = None;
+                                            let mut to_apply = None;
+
+                                            let presets_list: Vec<(usize, String)> = self.custom_presets.iter().enumerate().map(|(i, p)| (i, p.name.clone())).collect();
+
+                                            for (idx, name) in presets_list {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(RichText::new(&name).size(13.0).color(Color32::WHITE));
+                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                        if ui.button("🗑 Sil").clicked() {
+                                                            to_delete = Some(idx);
+                                                        }
+                                                        if ui.button("📤 Dışa Aktar").clicked() {
+                                                            to_export = Some(idx);
+                                                        }
+                                                        if ui.button("Yükle").clicked() {
+                                                            to_apply = Some(name.clone());
+                                                        }
+                                                    });
+                                                });
+                                                ui.separator();
+                                            }
+
+                                            if let Some(idx) = to_delete {
+                                                self.custom_presets.remove(idx);
+                                                self.ui_dirty = true;
+                                            }
+                                            if let Some(name) = to_apply {
+                                                self.apply_preset_by_name(&name);
+                                            }
+                                            if let Some(idx) = to_export {
+                                                if let Some(cp) = self.custom_presets.get(idx) {
+                                                    let dir = AppConfig::config_dir().join("presets");
+                                                    let _ = std::fs::create_dir_all(&dir);
+                                                    let target = dir.join(format!("{}.posea", cp.name));
+                                                    if AppConfig::export_preset_file(cp, &target).is_ok() {
+                                                        self.preset_status_msg = Some((format!("Dışa aktarıldı: {}", target.display()), Instant::now()));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                                PreferencesTab::Hotkeys => {
+                                    ui.label(RichText::new("Sistem Genelinde Arka Plan Kısayolları").size(15.0).strong().color(Color32::WHITE));
+                                    ui.add_space(2.0);
+                                    ui.label(RichText::new("Posea Audio simge durumundayken veya oyundayken dahi çalışır:").size(11.5).color(Color32::from_rgb(160, 164, 180)));
+                                    ui.add_space(8.0);
+
+                                    let hotkey_row = |ui: &mut egui::Ui, key: &str, desc: &str| {
+                                        ui.horizontal(|ui| {
+                                            let (k_rect, _) = ui.allocate_exact_size(Vec2::new(140.0, 26.0), Sense::hover());
+                                            ui.painter().rect_filled(k_rect, 4.0, Color32::from_rgb(26, 29, 38));
+                                            ui.painter().rect_stroke(k_rect, 4.0, Stroke::new(1.0, Color32::from_rgb(50, 54, 70)), egui::StrokeKind::Inside);
+                                            ui.painter().text(k_rect.center(), egui::Align2::CENTER_CENTER, key, egui::FontId::proportional(12.0), Theme::ACCENT_RED);
+
+                                            ui.add_space(8.0);
+                                            ui.label(RichText::new(desc).size(12.5).color(Color32::WHITE));
+                                        });
+                                        ui.add_space(4.0);
+                                    };
+
+                                    hotkey_row(ui, "Ctrl + Alt + Space", "DSP Bypass / Açık Geçişi (Aç/Kapat)");
+                                    hotkey_row(ui, "Ctrl + Alt + B", "Bass Güçlendirme Hızlı Aç / Kapat");
+                                    hotkey_row(ui, "Ctrl + Alt + P", "Sonraki Ses Profiline Geç (Cycle)");
+                                    hotkey_row(ui, "Ctrl + Alt + M", "Anında Sessize Al / Sesi Aç (Mute)");
+
+                                    ui.add_space(10.0);
+                                    ui.label(RichText::new("💡 İpucu: Ekolayzır üzerinde Shift tuşuna basılı tutarak farenizi sürüklediğinizde yumuşak Gauss eğrisi serbest çizilir.").size(11.0).color(Theme::TEXT_MUTED));
                                 }
                                 PreferencesTab::General => {
                                     ui.label(RichText::new("Genel Tercihler").size(15.0).strong().color(Color32::WHITE));
@@ -1026,8 +1564,9 @@ impl eframe::App for PoseaMixerApp {
                                     ui.label(RichText::new("Posea Audio Hakkında").size(15.0).strong().color(Color32::WHITE));
                                     ui.add_space(8.0);
                                     ui.label(RichText::new("Sürüm: 1.0.0 (Release)").color(Theme::TEXT_SECONDARY));
-                                    ui.label(RichText::new("Motor: Posea Virtual Driver & Lock-Free DSP").color(Theme::TEXT_SECONDARY));
-                                    ui.label(RichText::new("Ekolayzır: 31-Bant 1/3 Octave ISO").color(Theme::TEXT_SECONDARY));
+                                    ui.label(RichText::new("Motor: Posea Virtual Driver & Lock-Free Multi-Rate DSP").color(Theme::TEXT_SECONDARY));
+                                    ui.label(RichText::new("Ekolayzır: 31-Bant 1/3 Octave ISO Parametrik Spline").color(Theme::TEXT_SECONDARY));
+                                    ui.label(RichText::new("Profil Kütüphanesi: AutoEQ Harman Headphone Target Database").color(Theme::TEXT_SECONDARY));
                                     ui.add_space(10.0);
                                     ui.label(RichText::new("Sanal Aygıt Durumu: Aktif (Hoparlör - Posea Audio Virtual Device)").color(Theme::ACCENT_GREEN));
                                 }

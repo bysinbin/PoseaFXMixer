@@ -1,4 +1,5 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
+#![allow(dead_code, unused_imports)]
 
 mod dsp;
 mod engine;
@@ -14,6 +15,7 @@ use crate::dsp::{DspSettings, VisualizerData};
 use crate::engine::AudioBridge;
 use crate::gui::app::PoseaMixerApp;
 use crate::utils::config::AppConfig;
+use crate::utils::hotkeys::HotkeyManager;
 use crate::utils::single_instance::SingleInstance;
 
 fn main() -> eframe::Result<()> {
@@ -39,12 +41,18 @@ fn main() -> eframe::Result<()> {
     initial_dsp.bass_boost = config.dsp.bass_boost;
     initial_dsp.master_volume = config.dsp.master_volume;
     initial_dsp.eq_bands = config.dsp.eq_bands;
+    initial_dsp.normalization_db = config.ui.normalization_db;
+    initial_dsp.balance = config.ui.balance;
+    initial_dsp.filter_q = config.ui.filter_q;
 
     let settings = Arc::new(RwLock::new(initial_dsp));
     let visualizer = VisualizerData::new();
     let selected_input = Arc::new(RwLock::new(None));
     let selected_output = Arc::new(RwLock::new(config.ui.selected_output.clone()));
     let reload_requested = Arc::new(AtomicBool::new(false));
+
+    // Global Klavye Kısayolları Yöneticisi (Ctrl+Alt+Space, Ctrl+Alt+B, Ctrl+Alt+P, Ctrl+Alt+M)
+    let hotkey_manager = HotkeyManager::new(single_instance.egui_ctx.clone());
 
     // Ses köprüsünü (Audio Bridge) bağımsız yüksek öncelikli iş parçacığında başlat
     let bridge = AudioBridge::new(
@@ -75,14 +83,17 @@ fn main() -> eframe::Result<()> {
         Err(_) => None,
     };
 
+    let initial_size = if config.ui.is_mini_mode { [480.0, 195.0] } else { [960.0, 540.0] };
+    let min_size = if config.ui.is_mini_mode { [440.0, 180.0] } else { [880.0, 480.0] };
+
     // Çerçevesiz (Frameless) ve Şeffaf Köşeli Modern Pencere
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Posea Audio")
         .with_decorations(false)         // Standart Windows başlık çubuğunu kaldırır
         .with_transparent(true)           // Yuvarlatılmış zarif köşeler için şeffaflık
         .with_resizable(true)             // Boyutlandırılabilir pencere
-        .with_inner_size([960.0, 540.0])  // 16:9 geniş format oranı
-        .with_min_inner_size([880.0, 480.0])
+        .with_inner_size(initial_size)
+        .with_min_inner_size(min_size)
         .with_visible(!is_minimized);
 
     if let Some(icon) = icon_data {
@@ -107,6 +118,7 @@ fn main() -> eframe::Result<()> {
                 reload_requested,
                 config,
                 single_instance,
+                hotkey_manager,
             );
             Ok(Box::new(app))
         }),

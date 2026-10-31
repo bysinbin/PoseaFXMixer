@@ -43,6 +43,22 @@ impl EqWidget {
         let content_h = rect.height() - pad_top - pad_bot;
         let center_y = rect.min.y + pad_top + (content_h * 0.5);
 
+        // Sağ Üst İpucu: Serbest Çizim
+        let is_shift_down = ui.input(|i| i.modifiers.shift);
+        let mode_hint = if is_shift_down {
+            "✏ Serbest Spline Çizim Modu Aktif"
+        } else {
+            "31-Bant ISO EQ (Shift + Sürükle: Serbest Çizim)"
+        };
+        let hint_color = if is_shift_down { Theme::ACCENT_RED } else { Color32::from_rgb(100, 105, 120) };
+        painter.text(
+            Pos2::new(rect.max.x - 14.0, rect.min.y + 10.0),
+            egui::Align2::RIGHT_TOP,
+            mode_hint,
+            egui::FontId::proportional(10.0),
+            hint_color,
+        );
+
         // 1. 0 dB Referans Kesikli Çizgisi
         let mut dash_x = rect.min.x + pad_x;
         while dash_x < rect.max.x - pad_x {
@@ -79,7 +95,7 @@ impl EqWidget {
                 dot_y += 5.0;
             }
 
-            // Alt frekans etiketleri (Alt kenardan yukarıda, ferah ve okunabilir)
+            // Alt frekans etiketleri
             let text_color = if is_hovered { Color32::WHITE } else { Color32::from_rgb(125, 128, 144) };
             painter.text(
                 Pos2::new(x, rect.max.y - 25.0),
@@ -187,7 +203,7 @@ impl EqWidget {
             );
         }
 
-        // 7. Etkileşim: Sürükleme ve Çift Tıklama (Kilitli Güvenli Etkileşim)
+        // 7. Etkileşim: Sürükleme, Çift Tıklama ve Serbest Çizim
         let mut changed = false;
 
         let pointer_down = ui.input(|i| i.pointer.primary_down());
@@ -207,8 +223,43 @@ impl EqWidget {
                         }
                     }
                 }
+            } else if pointer_down && response.dragged() && is_shift_down {
+                // --- SERBEST SPLINE ÇİZİM MODU (Shift + Drag) ---
+                if let Some(mouse_pos) = pointer_pos {
+                    let clamped_y = mouse_pos.y.clamp(rect.min.y + pad_top, rect.max.y - pad_bot);
+                    let norm = (center_y - clamped_y) / (content_h * 0.40);
+                    let target_gain = (norm * 12.0).round().clamp(-12.0, 12.0);
+
+                    // Fareye en yakın bandı bul
+                    let mut nearest_idx = 0;
+                    let mut min_d = f32::MAX;
+                    for (i, np) in node_positions.iter().enumerate() {
+                        let d = (np.x - mouse_pos.x).abs();
+                        if d < min_d {
+                            min_d = d;
+                            nearest_idx = i;
+                        }
+                    }
+
+                    // Gaussian Yumuşak Dağılım ile komşu bantları da pürüzsüz enterpole et
+                    for offset in -2..=2 {
+                        let idx = nearest_idx as isize + offset;
+                        if idx >= 0 && (idx as usize) < NUM_EQ_BANDS {
+                            let u_idx = idx as usize;
+                            let dist = offset.abs() as f32;
+                            let weight = (-dist * dist * 0.45).exp();
+                            let current = eq_bands[u_idx];
+                            let blended = current * (1.0 - weight * 0.65) + target_gain * (weight * 0.65);
+                            let new_val = (blended * 2.0).round() * 0.5; // 0.5 dB hassasiyet
+                            if (eq_bands[u_idx] - new_val).abs() > 0.05 {
+                                eq_bands[u_idx] = new_val.clamp(-12.0, 12.0);
+                                changed = true;
+                            }
+                        }
+                    }
+                }
             } else {
-                // Yeni bir tıklama başladığında ve henüz aktif bir bant seçilmemişken
+                // --- STANDART TEK BANT KİLİTLİ SÜRÜKLEME ---
                 if pointer_down && active_band.is_none() && ui.input(|i| i.pointer.any_pressed()) && response.hovered() {
                     if let Some(mouse_pos) = pointer_pos {
                         let in_y_range = mouse_pos.y >= (rect.min.y + pad_top - 12.0)
@@ -233,7 +284,6 @@ impl EqWidget {
                     }
                 }
 
-                // Kilitlenmiş aktif bant varsa, sadece o bandın kazancını güncelle
                 if pointer_down {
                     if let Some(idx) = *active_band {
                         if let Some(mouse_pos) = pointer_pos {

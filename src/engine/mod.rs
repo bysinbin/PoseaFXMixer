@@ -1,6 +1,7 @@
 pub mod bridge;
 pub mod driver_manager;
 pub mod endpoint_volume;
+pub mod session_mixer;
 pub use bridge::AudioBridge;
 pub use driver_manager::DriverManager;
 

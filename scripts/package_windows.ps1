@@ -6,6 +6,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 Write-Host ">>> [1/3] Building Posea Audio in Release Mode..." -ForegroundColor Cyan
+Get-Process -Name "posea_fx_mixer*" -ErrorAction SilentlyContinue | Stop-Process -Force
 cargo build --release
 
 $distDir = "dist"

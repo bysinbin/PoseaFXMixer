@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use crate::dsp::{DspSettings, NUM_EQ_BANDS};
 
@@ -22,6 +22,17 @@ pub struct DspConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomPreset {
+    pub name: String,
+    pub clarity: f32,
+    pub ambience: f32,
+    pub surround: f32,
+    pub dynamic_boost: f32,
+    pub bass_boost: f32,
+    pub eq_bands: [f32; NUM_EQ_BANDS],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UiConfig {
     pub selected_preset_name: String,
     pub selected_output: Option<String>,
@@ -31,6 +42,10 @@ pub struct UiConfig {
     pub normalization_db: f32,
     pub filter_q: f32,
     pub balance: f32,
+    #[serde(default)]
+    pub is_mini_mode: bool,
+    #[serde(default)]
+    pub custom_presets: Vec<CustomPreset>,
 }
 
 impl Default for AppConfig {
@@ -56,6 +71,8 @@ impl Default for AppConfig {
                 normalization_db: 0.0,
                 filter_q: 1.0,
                 balance: 0.0,
+                is_mini_mode: false,
+                custom_presets: Vec::new(),
             },
         }
     }
@@ -111,5 +128,17 @@ impl AppConfig {
         if let Ok(json) = serde_json::to_string_pretty(self) {
             let _ = fs::write(path, json);
         }
+    }
+
+    /// Özel bir ön ayarı .posea/.json dosyasına aktarır
+    pub fn export_preset_file(preset: &CustomPreset, path: &Path) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(preset).map_err(|e| e.to_string())?;
+        fs::write(path, json).map_err(|e| e.to_string())
+    }
+
+    /// .posea/.json dosyasından özel ön ayar yükler
+    pub fn import_preset_file(path: &Path) -> Result<CustomPreset, String> {
+        let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
+        serde_json::from_str::<CustomPreset>(&content).map_err(|e| e.to_string())
     }
 }
