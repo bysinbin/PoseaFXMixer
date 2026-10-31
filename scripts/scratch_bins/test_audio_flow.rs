@@ -36,11 +36,11 @@ fn main() -> anyhow::Result<()> {
         name.contains("LG") || name.contains("AMD") || name.contains("Realtek")
     }).expect("Fiziksel çıkış aygıtı (LG/Realtek) bulunamadı!").clone();
 
-    // Giriş (Sanal Aygıt / Sonic Studio)
+    // Giriş (Sanal Aygıt / Posea Audio Virtual)
     let capture_device = devices.iter().find(|d| {
         let name = d.description().map(|desc| desc.name().to_string()).unwrap_or_default();
-        name.contains("Sonic Studio") || name.contains("Virtual")
-    }).expect("Sanal giriş aygıtı (Sonic Studio/Posea Audio) bulunamadı!").clone();
+        name.contains("Posea Audio Virtual") || name.contains("Virtual")
+    }).expect("Sanal giriş aygıtı (Posea Audio Virtual/Posea Audio) bulunamadı!").clone();
 
     let out_name = output_device.description()?.name().to_string();
     let cap_name = capture_device.description()?.name().to_string();
@@ -68,7 +68,7 @@ fn main() -> anyhow::Result<()> {
     let mut limiter = FastLimiter::new(out_sr);
     dsp.update_settings(&settings);
 
-    // 1. Giriş Akışı (Sonic Studio üzerinden Loopback)
+    // 1. Giriş Akışı (Posea Audio Virtual üzerinden Loopback)
     let in_cfg = capture_device.default_output_config()?;
     let in_channels = in_cfg.channels() as usize;
 

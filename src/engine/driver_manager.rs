@@ -10,7 +10,6 @@ impl DriverManager {
             name.contains("Posea") 
                 || name.contains("Virtual") 
                 || name.contains("Cable") 
-                || name.contains("Sonic Studio") 
                 
                 || name.contains("Steam Streaming")
         })

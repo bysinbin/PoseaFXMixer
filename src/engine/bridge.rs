@@ -294,7 +294,6 @@ impl AudioBridge {
                 let name = desc.name();
                 if !name.contains("Posea") 
                     && !name.contains("Virtual") 
-                    && !name.contains("Sonic Studio") 
                     && !name.to_lowercase().contains("virtual") 
                     && !name.contains("Digital Output") 
                 {
