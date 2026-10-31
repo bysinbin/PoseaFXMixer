@@ -11,6 +11,9 @@ pub const EQ_FREQS: [f32; NUM_EQ_BANDS] = [
 
 pub struct DspProcessor {
     sample_rate: f32,
+    // 0. Subsonik Koruma (20 Hz High-Pass, DC ofset ve boğucu dip gürültüleri engeller)
+    subsonic_filter_l: BiquadFilter,
+    subsonic_filter_r: BiquadFilter,
     // 1. Bass Shelf
     bass_filter_l: BiquadFilter,
     bass_filter_r: BiquadFilter,
@@ -28,6 +31,10 @@ pub struct DspProcessor {
     speech_enhancer: SpeechEnhancer,
     // 5. Akıllı Algısal Loudness Normalizasyonu
     loudness_normalizer: LoudnessNormalizer,
+    // Dinamik Zarf Takipçisi (Upward compression için)
+    dyn_envelope: f32,
+    // Filtre Tavan Koruma Kazancı (Headroom scaling)
+    headroom_gain: f32,
 }
 
 impl DspProcessor {
@@ -35,6 +42,8 @@ impl DspProcessor {
         let delay_len = (sample_rate * 0.030) as usize; // 30 ms
         let mut p = Self {
             sample_rate,
+            subsonic_filter_l: BiquadFilter::new(),
+            subsonic_filter_r: BiquadFilter::new(),
             bass_filter_l: BiquadFilter::new(),
             bass_filter_r: BiquadFilter::new(),
             clarity_filter_l: BiquadFilter::new(),
@@ -46,6 +55,8 @@ impl DspProcessor {
             delay_samples: (sample_rate * 0.012) as usize, // 12 ms Haas
             speech_enhancer: SpeechEnhancer::new(sample_rate),
             loudness_normalizer: LoudnessNormalizer::new(sample_rate),
+            dyn_envelope: 0.1,
+            headroom_gain: 1.0,
         };
         p.update_settings(&DspSettings::default());
         p
@@ -64,23 +75,40 @@ impl DspProcessor {
     pub fn update_settings(&mut self, s: &DspSettings) {
         let sr = self.sample_rate;
 
-        // 1. Bass Boost (80 Hz Low-shelf, 0..10 -> 0..18 dB)
-        let bass_db = s.bass_boost * 1.8;
+        // 0. Subsonik 20 Hz Filtresi (Hoparlör ve kulaklıkların kaldıramayacağı dip titreşimleri temizler)
+        self.subsonic_filter_l.set_high_pass(sr, 20.0, 0.707);
+        self.subsonic_filter_r.set_high_pass(sr, 20.0, 0.707);
+
+        // 1. Bass Boost (80 Hz Low-shelf, 0..10 -> 0..14 dB kontrollü)
+        let bass_db = s.bass_boost * 1.4;
         self.bass_filter_l.set_low_shelf(sr, 80.0, 0.707, bass_db);
         self.bass_filter_r.set_low_shelf(sr, 80.0, 0.707, bass_db);
 
-        // 2. Clarity Boost (5000 Hz High-shelf, 0..10 -> 0..15 dB)
-        let clarity_db = s.clarity * 1.5;
+        // 2. Clarity Boost (5000 Hz High-shelf, 0..10 -> 0..12 dB kontrollü)
+        let clarity_db = s.clarity * 1.2;
         self.clarity_filter_l.set_high_shelf(sr, 5000.0, 0.707, clarity_db);
         self.clarity_filter_r.set_high_shelf(sr, 5000.0, 0.707, clarity_db);
 
-        // 3. 31-Bant ISO Standart Grafik EQ (Q parametrik ayarı, varsayılan 2.8)
+        // 3. 31-Bant ISO Standart Grafik EQ
         let q = if s.filter_q > 0.1 { 2.8 * s.filter_q } else { 2.8 };
+        let mut total_pos_eq = 0.0;
         for i in 0..NUM_EQ_BANDS {
             let freq = EQ_FREQS[i];
             let gain = s.eq_bands[i];
+            if gain > 0.0 {
+                total_pos_eq += gain;
+            }
             self.eq_filters_l[i].set_peaking(sr, freq, q, gain);
             self.eq_filters_r[i].set_peaking(sr, freq, q, gain);
+        }
+
+        // 4. Akıllı Headroom Hesaplaması (Aşırı EQ yükseltildiğinde filtrelerin iç taşmasını önler)
+        let combined_boost = bass_db.max(0.0) + clarity_db.max(0.0) + (total_pos_eq * 0.15);
+        if combined_boost > 16.0 {
+            let comp_db = -(combined_boost - 16.0) * 0.45;
+            self.headroom_gain = 10.0_f32.powf(comp_db / 20.0);
+        } else {
+            self.headroom_gain = 1.0;
         }
     }
 
@@ -91,17 +119,36 @@ impl DspProcessor {
             return (in_l * settings.master_volume, in_r * settings.master_volume);
         }
 
-        // 1. Dynamic Volume Boost (0..10 -> 0..16 dB Pre-Gain)
-        let pre_gain_db = settings.dynamic_boost * 1.6;
-        let pre_gain = 10.0_f32.powf(pre_gain_db / 20.0);
-        let mut l = in_l * pre_gain;
-        let mut r = in_r * pre_gain;
+        // 0. Subsonik DC Temizleme
+        let mut l = self.subsonic_filter_l.process(in_l);
+        let mut r = self.subsonic_filter_r.process(in_r);
+
+        // 1. Akıllı Dinamik Yükseltme (Adaptive Upward Compression)
+        // Ham çarpma yerine dinamik aralık takibi: Kısık sesleri kaldırır, zirvelerde tavanı korur
+        let peak_in = l.abs().max(r.abs());
+        if peak_in > self.dyn_envelope {
+            self.dyn_envelope += (peak_in - self.dyn_envelope) * 0.08;
+        } else {
+            self.dyn_envelope += (peak_in - self.dyn_envelope) * 0.001;
+        }
+
+        if settings.dynamic_boost > 0.05 {
+            let crest_factor = (1.0 - (self.dyn_envelope * 0.75)).clamp(0.25, 1.0);
+            let boost_db = settings.dynamic_boost * 1.25 * crest_factor;
+            let pre_gain = 10.0_f32.powf(boost_db / 20.0);
+            l *= pre_gain;
+            r *= pre_gain;
+        }
+
+        // Headroom kazancı (aşırı bant yükseltmelerinde filtrelerin bozulmasını önler)
+        l *= self.headroom_gain;
+        r *= self.headroom_gain;
 
         // 2. Bass Boost
         l = self.bass_filter_l.process(l);
         r = self.bass_filter_r.process(r);
 
-        // 3. Vektörize / Unrolled 31-Bant Grafik EQ (Döngü optimizasyonu)
+        // 3. Vektörize / Unrolled 31-Bant Grafik EQ
         for i in (0..28).step_by(4) {
             l = self.eq_filters_l[i].process(l);
             r = self.eq_filters_r[i].process(r);
@@ -117,12 +164,13 @@ impl DspProcessor {
             r = self.eq_filters_r[i].process(r);
         }
 
-        // 4. Clarity & Tiz Doygunluğu (Harmonic Exciter)
+        // 4. Clarity & Tiz Doygunluğu (Pürüzsüz Analog Doygunluk)
         l = self.clarity_filter_l.process(l);
         r = self.clarity_filter_r.process(r);
         if settings.clarity > 2.0 {
-            l = soft_saturate(l, 1.0 + (settings.clarity * 0.015));
-            r = soft_saturate(r, 1.0 + (settings.clarity * 0.015));
+            let drive = 1.0 + (settings.clarity * 0.015);
+            l = soft_saturate(l, drive);
+            r = soft_saturate(r, drive);
         }
 
         // 5. Akıllı Diyalog ve İnsan Sesi Netleştirici
@@ -184,6 +232,8 @@ impl DspProcessor {
     }
 
     pub fn reset(&mut self) {
+        self.subsonic_filter_l.reset();
+        self.subsonic_filter_r.reset();
         self.bass_filter_l.reset();
         self.bass_filter_r.reset();
         self.clarity_filter_l.reset();
@@ -193,17 +243,14 @@ impl DspProcessor {
         self.delay_buffer.fill(0.0);
         self.speech_enhancer.reset();
         self.loudness_normalizer.reset();
+        self.dyn_envelope = 0.1;
     }
 }
 
+/// Analog Bant Tipi Pürüzsüz Doygunluk (Smooth Tape Saturation)
+/// Asla tepe noktalarını sıfıra düşürmez veya sert köşeli kırpma yapmaz.
 #[inline(always)]
 fn soft_saturate(x: f32, drive: f32) -> f32 {
     let driven = x * drive;
-    if driven > 1.0 {
-        1.0 - (1.0 / (1.0 + driven - 1.0))
-    } else if driven < -1.0 {
-        -1.0 + (1.0 / (1.0 - driven - 1.0))
-    } else {
-        driven - (driven * driven * driven * 0.15)
-    }
+    (driven * 0.95).tanh()
 }

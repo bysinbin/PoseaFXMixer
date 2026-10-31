@@ -106,6 +106,27 @@ impl BiquadFilter {
         self.a2 = a2 * inv_a0;
     }
 
+    /// High-Pass Filtresi (Subsonik parazitleri ve DC ofsetini kesmek için - 20 Hz)
+    pub fn set_high_pass(&mut self, sample_rate: f32, freq: f32, q: f32) {
+        let omega = 2.0 * std::f32::consts::PI * (freq / sample_rate);
+        let alpha = omega.sin() / (2.0 * q.max(0.1));
+        let cos_w = omega.cos();
+
+        let b0 = (1.0 + cos_w) * 0.5;
+        let b1 = -(1.0 + cos_w);
+        let b2 = (1.0 + cos_w) * 0.5;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos_w;
+        let a2 = 1.0 - alpha;
+
+        let inv_a0 = 1.0 / a0;
+        self.b0 = b0 * inv_a0;
+        self.b1 = b1 * inv_a0;
+        self.b2 = b2 * inv_a0;
+        self.a1 = a1 * inv_a0;
+        self.a2 = a2 * inv_a0;
+    }
+
     pub fn set_bypass(&mut self) {
         self.b0 = 1.0;
         self.b1 = 0.0;
